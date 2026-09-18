@@ -12,6 +12,10 @@
          launcher the moment a call ends; POST_NOTIFICATIONS covers the notification fallback. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets the post-call card open by itself when the call ends on a locked phone, the same way
+         a dialer shows an incoming call. Without the overlay permission this is the only route
+         Android leaves open. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <queries>
         <!-- Package visibility declarations for OEM/ColorOS system framework services -->
@@ -46,6 +50,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            The post-call card as a screen: opened by tapping the notification, and thrown up by
+            the notification's full-screen intent when the phone is locked. Kept out of Recents and
+            given no history so it never lingers behind the counselor's real work.
+        -->
+        <activity
+            android:name=".CallPopupActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Calliq.Popup"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=".popup"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
 
         <receiver
             android:name=".CallReceiver"

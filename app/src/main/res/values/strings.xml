@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">calliq</string>
+    <string name="ciq_open_full_popup">Open the full popup</string>
 </resources>

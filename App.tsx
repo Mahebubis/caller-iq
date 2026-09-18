@@ -306,6 +306,20 @@ const App = (): React.JSX.Element => {
     }
   }, []);
 
+  /* The popup is the whole point of the app, so an install that cannot show it should not be able
+     to go unnoticed: the setup sheet opens itself once per launch until it is sorted. */
+  const setupPrompted = React.useRef(false);
+  useEffect(() => {
+    if (!readiness || setupPrompted.current) return;
+    if (!readiness.overlay || !readiness.callLog) {
+      setupPrompted.current = true;
+      const t = setTimeout(() => setIsPopupSetupOpen(true), 600);
+      return () => clearTimeout(t);
+    }
+    setupPrompted.current = true;
+    return undefined;
+  }, [readiness]);
+
   // AppState Listener
   useEffect(() => {
     fetchSystemData();

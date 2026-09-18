@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The expanded post-call notification: every outcome, one tap each.
+
+    Android only allows three action buttons on a notification, which is why the outcomes live in
+    this custom view instead — a notification is the fallback when the popup cannot be drawn, and a
+    fallback that can only offer three of the seven outcomes is not much of one.
+
+    Only the views RemoteViews supports are used (LinearLayout, GridLayout, TextView), and colours
+    come from theme attributes so the card reads correctly in both light and dark shades.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp"
+    android:paddingTop="2dp"
+    android:paddingBottom="6dp">
+
+    <TextView
+        android:id="@+id/ciq_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="?android:attr/textColorPrimary" />
+
+    <TextView
+        android:id="@+id/ciq_meta"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:layout_marginBottom="8dp"
+        android:textSize="12sp"
+        android:textColor="?android:attr/textColorSecondary" />
+
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:columnCount="2">
+
+        <TextView android:id="@+id/ciq_tag_0" style="@style/CiqNotifChip" />
+        <TextView android:id="@+id/ciq_tag_1" style="@style/CiqNotifChip" />
+        <TextView android:id="@+id/ciq_tag_2" style="@style/CiqNotifChip" />
+        <TextView android:id="@+id/ciq_tag_3" style="@style/CiqNotifChip" />
+        <TextView android:id="@+id/ciq_tag_4" style="@style/CiqNotifChip" />
+        <TextView android:id="@+id/ciq_tag_5" style="@style/CiqNotifChip" />
+        <TextView android:id="@+id/ciq_tag_6" style="@style/CiqNotifChip" />
+    </GridLayout>
+
+    <TextView
+        android:id="@+id/ciq_open"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:padding="8dp"
+        android:gravity="center"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:textColor="#6366F1"
+        android:text="@string/ciq_open_full_popup" />
+</LinearLayout>

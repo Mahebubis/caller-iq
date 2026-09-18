@@ -5,18 +5,22 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
-import android.graphics.Color
 import android.os.Build
 import android.util.Log
+import android.widget.RemoteViews
 
 /**
- * The fallback for the post-call popup: a heads-up notification carrying the same one-tap
- * outcomes. Used when "Display over other apps" is off (Android will not let any app draw over
- * the dialer without it) and whenever adding the overlay window fails.
+ * The post-call prompt as a notification — the route that needs no permission beyond notifications
+ * themselves, used whenever [CallPopupOverlay] cannot draw (no "Display over other apps", or the
+ * system refused the window).
  *
- * Notifications need no special permission below Android 13; on 13+ the app asks for
- * POST_NOTIFICATIONS at startup.
+ * Two things make it a real fallback rather than a consolation prize:
+ *
+ *  · it carries EVERY outcome, not the three that Android allows as action buttons, by drawing its
+ *    own expanded layout (ciq_notif_expanded.xml). One tap tags the call from the shade.
+ *  · it sets a full-screen intent, so when the phone is locked as the call ends, Android opens
+ *    [CallPopupActivity] outright — the animated card, with no tap at all. Unlocked, the same
+ *    notification arrives as a heads-up banner, and tapping it opens that card.
  */
 object CallPopupNotifier {
 
@@ -24,8 +28,13 @@ object CallPopupNotifier {
     private const val CHANNEL_ID = "calliq_post_call"
     const val NOTIFICATION_ID = 4711
 
-    /** The three outcomes offered as notification buttons — Android shows at most three. */
+    /** The three shown as ordinary action buttons on the collapsed notification. */
     private val QUICK = listOf("Interested", "Callback Scheduled", "Not Answering")
+
+    private val CHIP_IDS = intArrayOf(
+        R.id.ciq_tag_0, R.id.ciq_tag_1, R.id.ciq_tag_2, R.id.ciq_tag_3,
+        R.id.ciq_tag_4, R.id.ciq_tag_5, R.id.ciq_tag_6,
+    )
 
     private fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -34,9 +43,9 @@ object CallPopupNotifier {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Post-call tagging", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Asks for the outcome right after a call ends"
-                enableVibration(false)
+                enableVibration(true)
                 setShowBadge(false)
-                lightColor = Color.BLUE
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
         )
     }
@@ -50,39 +59,54 @@ object CallPopupNotifier {
             ensureChannel(app)
             val nm = app.getSystemService(NotificationManager::class.java) ?: return
 
-            val typeLabel = when {
-                call.callType.startsWith("OUTGOING") -> "Outgoing"
-                call.callType.startsWith("INCOMING") -> "Incoming"
-                call.callType.startsWith("MISSED") -> "Missed"
-                call.callType.startsWith("REJECTED") -> "Rejected"
-                else -> "Call"
-            }
-            val dur = if (call.duration > 0) "${call.duration / 60}m ${call.duration % 60}s" else "not connected"
-            val summary = "$typeLabel · $dur · ${call.sim.display}"
+            val title = CallPopupView.titleFor(call)
+            val meta = CallPopupView.metaLine(call)
 
-            val open = PendingIntent.getActivity(
-                app, 0,
-                Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-                flags()
+            // Tapping the notification — or the lock screen firing the full-screen intent — opens
+            // the same card as a screen.
+            val popup = PendingIntent.getActivity(
+                app, 1, CallPopupActivity.intentFor(app, call), flags()
             )
+
+            val big = RemoteViews(app.packageName, R.layout.ciq_notif_expanded).apply {
+                setTextViewText(R.id.ciq_title, title)
+                setTextViewText(R.id.ciq_meta, meta)
+                CallIqConfig.DISPOSITIONS.forEachIndexed { i, (label, _) ->
+                    if (i < CHIP_IDS.size) {
+                        setTextViewText(CHIP_IDS[i], label)
+                        setOnClickPendingIntent(
+                            CHIP_IDS[i],
+                            PendingIntent.getBroadcast(app, 200 + i, OutcomeActionReceiver.intentFor(app, call, label), flags())
+                        )
+                    }
+                }
+                setOnClickPendingIntent(R.id.ciq_open, popup)
+            }
 
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 Notification.Builder(app, CHANNEL_ID) else @Suppress("DEPRECATION") Notification.Builder(app)
 
             builder.setSmallIcon(android.R.drawable.sym_action_call)
-                .setContentTitle(call.number)
-                .setContentText("$summary — tag this call")
-                .setStyle(Notification.BigTextStyle().bigText("$summary\nTag the outcome so it reaches the dashboard."))
+                .setContentTitle(title)
+                .setContentText("$meta — tag this call")
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
-                .setContentIntent(open)
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                .setCategory(Notification.CATEGORY_CALL)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setContentIntent(popup)
+                // Locked phone: Android opens the card itself. Unlocked: a heads-up banner.
+                .setFullScreenIntent(popup, true)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                builder.setCustomBigContentView(big)
+                builder.style = Notification.DecoratedCustomViewStyle()
+            } else {
                 @Suppress("DEPRECATION") builder.setPriority(Notification.PRIORITY_HIGH)
             }
 
+            // Three of them also as ordinary buttons, for the collapsed shade and for watches.
             QUICK.forEachIndexed { i, outcome ->
-                val intent = OutcomeActionReceiver.intentFor(app, call, outcome)
-                val pi = PendingIntent.getBroadcast(app, 100 + i, intent, flags())
+                val pi = PendingIntent.getBroadcast(app, 100 + i, OutcomeActionReceiver.intentFor(app, call, outcome), flags())
                 builder.addAction(
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
                         Notification.Action.Builder(null as android.graphics.drawable.Icon?, outcome, pi).build()
@@ -91,9 +115,11 @@ object CallPopupNotifier {
             }
 
             nm.notify(NOTIFICATION_ID, builder.build())
+            CallIqConfig.notePopup(app, "notification shown for ${call.number.ifEmpty { "the last call" }} (allow “Display over other apps” for the instant popup)")
             Log.d(TAG, "Posted post-call notification for ${call.number}")
         } catch (e: Throwable) {
             Log.e(TAG, "Could not post the post-call notification: ${e.message}", e)
+            CallIqConfig.notePopup(app, "could not show anything: ${e.javaClass.simpleName}")
         }
     }
 
