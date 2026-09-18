@@ -664,7 +664,7 @@ const App = (): React.JSX.Element => {
       <View style={styles.headerBar}>
         <View style={styles.headerLeft}>
           <Text style={styles.brandTitle}>CallIQ Enterprise</Text>
-          <Text style={styles.agentSub}>Agent Rahul • Counselor Unit 01</Text>
+          <Text style={styles.agentSub}>Agent Rahul 12:16 • Counselor Unit 01</Text>
         </View>
 
         <View style={styles.headerRightRow}>
