@@ -164,6 +164,75 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Everything that decides whether the post-call popup can appear, so the app can show a
+     * checklist instead of the counselor wondering why nothing happened.
+     */
+    @ReactMethod
+    fun getPopupReadiness(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            val notifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            } else {
+                androidx.core.app.NotificationManagerCompat.from(ctx).areNotificationsEnabled()
+            }
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            val result = Arguments.createMap().apply {
+                putBoolean("enabled", CallIqConfig.popupEnabled(ctx))
+                putBoolean("overlay", CallPopupOverlay.canShow(ctx))
+                putBoolean("notifications", notifications)
+                putBoolean("battery", pm?.isIgnoringBatteryOptimizations(ctx.packageName) ?: true)
+                putBoolean("callLog", ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED)
+                putBoolean("needsOemSteps", OemSettings.needsExtraSteps())
+                putString("manufacturer", OemSettings.manufacturer())
+                putString("oemSteps", OemSettings.extraStepsText())
+                putString("lastNote", CallIqConfig.popupNote(ctx))
+                putDouble("lastNoteAt", CallIqConfig.popupNoteAt(ctx).toDouble())
+            }
+            promise.resolve(result)
+        } catch (e: Throwable) {
+            promise.reject("readiness_failed", e)
+        }
+    }
+
+    /** Opens the OEM screen that owns one of the switches the popup depends on. */
+    @ReactMethod
+    fun openOemSetting(kind: String, promise: Promise) {
+        try {
+            val ok = when (kind) {
+                "popup" -> OemSettings.openBackgroundPopupSettings(reactApplicationContext)
+                "autostart" -> OemSettings.openAutostartSettings(reactApplicationContext)
+                "notifications" -> OemSettings.openNotificationSettings(reactApplicationContext)
+                else -> false
+            }
+            promise.resolve(ok)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /**
+     * Rehearse a real call ending, using the same code path the phone-state receiver takes — the
+     * honest way to prove the popup works without having to call someone.
+     */
+    @ReactMethod
+    fun simulateCallEnd(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            CallIqConfig.prefs(ctx).edit().remove(CallIqConfig.KEY_LAST_POPUP_KEY).apply()
+            val record = CallLogHelper.latestCall(ctx) ?: CallLogHelper.CallRecord(
+                number = "", callType = "OUTGOING", duration = 0L,
+                timestamp = System.currentTimeMillis(), idempotencyKey = "", accountId = "",
+                sim = SimResolver.resolve(ctx, "", null, System.currentTimeMillis()), fromLog = false,
+            )
+            CallReceiver.maybePrompt(ctx, record.copy(timestamp = System.currentTimeMillis()))
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
     /** Every SIM the phone reports, plus what this app has learned — the SIM diagnostics screen. */
     @ReactMethod
     fun getSimDiagnostics(promise: Promise) {

@@ -50,6 +50,22 @@ object CallIqConfig {
     fun appVersion(context: Context): String =
         try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" } catch (e: Throwable) { "" }
 
+    /* What happened the last time a call ended — the app's own answer to "why did no popup show?" */
+    private const val KEY_POPUP_NOTE = "POPUP_LAST_NOTE"
+    private const val KEY_POPUP_NOTE_AT = "POPUP_LAST_NOTE_AT"
+
+    fun notePopup(context: Context, note: String) {
+        try {
+            prefs(context).edit()
+                .putString(KEY_POPUP_NOTE, note)
+                .putLong(KEY_POPUP_NOTE_AT, System.currentTimeMillis())
+                .apply()
+        } catch (e: Throwable) { }
+    }
+
+    fun popupNote(context: Context): String = prefs(context).getString(KEY_POPUP_NOTE, "") ?: ""
+    fun popupNoteAt(context: Context): Long = prefs(context).getLong(KEY_POPUP_NOTE_AT, 0L)
+
     fun popupEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_ENABLED, true)
     fun popupForMissed(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_MISSED, true)
     fun popupTimeoutSec(context: Context): Int = prefs(context).getInt(KEY_POPUP_TIMEOUT, 45).coerceIn(10, 300)

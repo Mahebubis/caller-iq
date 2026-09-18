@@ -7,7 +7,14 @@ import android.util.Log
 
 object CallLogHelper {
 
-    /** One call as the app understands it, SIM already resolved. */
+    /**
+     * One call as the app understands it, SIM already resolved.
+     *
+     * `fromLog` false means this is what we knew the moment the call ended, before Android had
+     * written its call-log row: the popup opens on that immediately and fills the rest in a second
+     * or two later. `idempotencyKey` is empty until the row exists, which is why a tag made from
+     * the popup is matched on the server by time window rather than by key alone.
+     */
     data class CallRecord(
         val number: String,
         val callType: String,
@@ -16,6 +23,7 @@ object CallLogHelper {
         val idempotencyKey: String,
         val accountId: String,
         val sim: SimResolver.Sim,
+        val fromLog: Boolean = true,
     )
 
     /**
@@ -131,6 +139,22 @@ object CallLogHelper {
             Log.e("CallLogHelper", "Unexpected throwable during call log query: ${e.message}", e)
         }
         return newestRecord
+    }
+
+    /**
+     * The call the popup is waiting for: the newest row at or after `sinceMs`, optionally for a
+     * known number. Used to fill in a popup that opened before Android wrote the row.
+     */
+    fun findCallSince(context: Context, sinceMs: Long, numberNorm: String): CallRecord? {
+        val latest = latestCall(context) ?: return null
+        // Allow a little slack: the log's timestamp is when the call STARTED, and our clock for
+        // "when it started" can differ by a second or two.
+        if (latest.timestamp < sinceMs - 15_000) return null
+        if (numberNorm.isNotEmpty()) {
+            val got = latest.number.filter { it.isDigit() }.takeLast(10)
+            if (got.isNotEmpty() && got != numberNorm.takeLast(10)) return null
+        }
+        return latest
     }
 
     /** The most recent call in the log, regardless of what has already been synced. */

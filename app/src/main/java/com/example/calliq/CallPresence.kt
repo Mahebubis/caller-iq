@@ -83,6 +83,47 @@ object CallPresence {
     }
 
     /**
+     * What we know about the call the instant it ends, WITHOUT waiting for Android to write its
+     * call-log row: direction, the caller's number for an incoming call, when it started and
+     * whether it was ever answered. This is what the post-call popup opens on.
+     *
+     * Call it before [onIdle], which clears the bookkeeping.
+     */
+    fun endedSnapshot(context: Context): CallLogHelper.CallRecord? {
+        val prefs = CallIqConfig.prefs(context)
+        val started = prefs.getLong(KEY_STARTED_AT, 0L)
+        if (started <= 0L) return null
+
+        val direction = prefs.getString(KEY_DIRECTION, "") ?: ""
+        val number = prefs.getString(KEY_NUMBER, "") ?: ""
+        val answered = prefs.getLong(KEY_ANSWERED_AT, 0L)
+        val now = System.currentTimeMillis()
+
+        /* Type as far as it can honestly be known yet:
+           - incoming that was never answered  → MISSED (the log may later say REJECTED)
+           - incoming that was answered        → INCOMING
+           - anything we placed               → OUTGOING, answered or not; Android does not say. */
+        val type = when {
+            direction == DIR_INCOMING && answered <= 0L -> "MISSED"
+            direction == DIR_INCOMING -> "INCOMING"
+            direction == DIR_OUTGOING -> "OUTGOING"
+            else -> "UNKNOWN"
+        }
+        val duration = if (answered > 0L) ((now - answered) / 1000).coerceAtLeast(0L) else 0L
+
+        return CallLogHelper.CallRecord(
+            number = number,
+            callType = type,
+            duration = duration,
+            timestamp = started,
+            idempotencyKey = "",                       // unknown until the log row exists
+            accountId = "",
+            sim = SimResolver.resolve(context, "", null, started),
+            fromLog = false,
+        )
+    }
+
+    /**
      * Called when the app starts: if the phone is idle but we never reported the end of a call
      * (killed mid-call, rebooted), close it now so the dashboard stops showing it.
      */
@@ -122,6 +163,7 @@ object CallPresence {
             put("started_at", started)
             if (answered > 0) put("answered_at", answered)
             put("event_at", System.currentTimeMillis())
+            put("popup_ok", CallIqConfig.popupEnabled(context) && CallPopupOverlay.canShow(context))
             sim.slot?.let { put("sim_slot", it) }
             if (sim.carrier.isNotEmpty()) put("carrier", sim.carrier)
             if (sim.label.isNotEmpty()) put("sim_label", sim.label)

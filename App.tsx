@@ -33,6 +33,20 @@ export interface CallLogItem {
   outcome?: string; // Disposition tag
 }
 
+/** Everything that has to be true before Android will let the post-call popup appear. */
+export interface PopupReadiness {
+  enabled: boolean;
+  overlay: boolean;
+  notifications: boolean;
+  battery: boolean;
+  callLog: boolean;
+  needsOemSteps: boolean;
+  manufacturer: string;
+  oemSteps: string;
+  lastNote: string;
+  lastNoteAt: number;
+}
+
 export interface SimDiagnostics {
   sims?: Array<{ slot: number; subscriptionId: number; carrier: string; displayName: string; number: string }>;
   learned?: { [accountId: string]: number };
@@ -98,6 +112,8 @@ const App = (): React.JSX.Element => {
   const [syncing, setSyncing] = useState<boolean>(false);
 
   // Post-call popup + SIM detection
+  const [readiness, setReadiness] = useState<PopupReadiness | null>(null);
+  const [isPopupSetupOpen, setIsPopupSetupOpen] = useState<boolean>(false);
   const [overlayGranted, setOverlayGranted] = useState<boolean>(true);
   const [popupEnabled, setPopupEnabled] = useState<boolean>(true);
   const [popupForMissed, setPopupForMissed] = useState<boolean>(true);
@@ -236,6 +252,12 @@ const App = (): React.JSX.Element => {
         if (typeof statusRes.popupTimeoutSec === 'number') setPopupTimeout(statusRes.popupTimeoutSec);
       }
 
+      if (CallBridge?.getPopupReadiness) {
+        try {
+          setReadiness(await withTimeout<any>(CallBridge.getPopupReadiness().catch(() => null), 1500, null));
+        } catch (_) {}
+      }
+
       if (CallBridge?.getSimDiagnostics) {
         try {
           const diagJson = await withTimeout(CallBridge.getSimDiagnostics().catch(() => '{}'), 1500, '{}');
@@ -348,6 +370,30 @@ const App = (): React.JSX.Element => {
       }
     } catch (err: any) {
       addLog(`Popup settings error: ${err.message || err}`);
+    }
+  };
+
+  // Xiaomi, Realme/Oppo, Vivo and Honor each hide their own pop-up and autostart switches in
+  // their own security app; the native side knows where they are on this make of phone.
+  const openOem = async (kind: 'popup' | 'autostart' | 'notifications') => {
+    try {
+      const ok = await CallBridge?.openOemSetting?.(kind);
+      addLog(ok ? `Opened the ${kind} settings screen.` : `No ${kind} settings screen on this phone.`);
+      if (!ok) Alert.alert('Open Settings manually', readiness?.oemSteps || 'Allow "Display over other apps" for CallIQ in Settings.');
+      setTimeout(fetchSystemData, 2000);
+    } catch (err: any) {
+      addLog(`OEM settings error: ${err.message || err}`);
+    }
+  };
+
+  // Runs the very same path a real hang-up takes, so a pass here means real calls will pop up too.
+  const handleSimulateCallEnd = async () => {
+    try {
+      const ok = await CallBridge?.simulateCallEnd?.();
+      if (!ok) Alert.alert('Could not show it', 'Check the steps above — “Display over other apps” is what Android requires.');
+      setTimeout(fetchSystemData, 1500);
+    } catch (err: any) {
+      addLog(`Test error: ${err.message || err}`);
     }
   };
 
@@ -528,6 +574,72 @@ const App = (): React.JSX.Element => {
     return list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [callLogs, selectedFilter, searchQuery]);
 
+  /* What still stands between a hung-up call and the popup. "Display over other apps" is the only
+     hard requirement; the rest decide whether it keeps working once the app is out of sight. */
+  const readinessSteps = useMemo(() => {
+    if (!readiness) return [];
+    return [
+      {
+        key: 'callLog',
+        ok: readiness.callLog,
+        title: 'Call log & Phone permission',
+        desc: 'Lets the app see that a call happened, and which SIM it used.',
+        action: handleRequestPermissions,
+        cta: 'Allow',
+        required: true,
+      },
+      {
+        key: 'overlay',
+        ok: readiness.overlay,
+        title: 'Display over other apps',
+        desc: 'Android blocks every popup over the dialer without this. This is the one that matters.',
+        action: handleEnableOverlay,
+        cta: 'Allow',
+        required: true,
+      },
+      ...(readiness.needsOemSteps ? [{
+        key: 'oemPopup',
+        ok: null as boolean | null,
+        title: `${readiness.manufacturer}: background pop-ups`,
+        desc: readiness.oemSteps,
+        action: () => openOem('popup'),
+        cta: 'Open',
+        required: true,
+      }, {
+        key: 'oemAutostart',
+        ok: null as boolean | null,
+        title: `${readiness.manufacturer}: autostart`,
+        desc: 'Without autostart this phone stops waking the app once it is swiped away, so no call is noticed at all.',
+        action: () => openOem('autostart'),
+        cta: 'Open',
+        required: true,
+      }] : []),
+      {
+        key: 'battery',
+        ok: readiness.battery,
+        title: 'Unrestricted battery',
+        desc: 'Stops Android pausing the app between calls.',
+        action: handleRequestBatteryExemption,
+        cta: 'Fix',
+        required: false,
+      },
+      {
+        key: 'notifications',
+        ok: readiness.notifications,
+        title: 'Notifications',
+        desc: 'The fallback prompt when the popup itself cannot be drawn.',
+        action: () => openOem('notifications'),
+        cta: 'Allow',
+        required: false,
+      },
+    ];
+  }, [readiness]);
+
+  // Steps the phone can actually verify. The OEM ones cannot be read back, so they are never
+  // counted as done — they are shown as "check once".
+  const missingSteps = readinessSteps.filter((s) => s.ok === false).length;
+  const popupReady = !!readiness && readiness.overlay && readiness.callLog && !readiness.needsOemSteps;
+
   // Call Type Details
   const getCallTypeDetails = (type: string) => {
     switch (type ? type.toUpperCase() : '') {
@@ -596,22 +708,27 @@ const App = (): React.JSX.Element => {
         contentContainerStyle={styles.scrollBody}
         keyboardShouldPersistTaps="always"
       >
-        {/* Post-call popup needs "Display over other apps" — without it the popup cannot
-            appear over the dialer, and only a notification can be shown instead. */}
-        {popupEnabled && !overlayGranted && (
+        {/* The popup cannot appear until Android (and, on some makes, the phone's own security
+            app) allows it. Rather than failing silently, say exactly what is still missing. */}
+        {popupEnabled && readiness && !popupReady && (
           <View style={styles.popupWarningCard}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.popupWarningTitle}>📋 Turn on the post-call popup</Text>
+              <Text style={styles.popupWarningTitle}>
+                📋 Post-call popup is not ready{missingSteps > 0 ? ` — ${missingSteps} step${missingSteps === 1 ? '' : 's'} left` : ''}
+              </Text>
               <Text style={styles.popupWarningDesc}>
-                Allow "Display over other apps" so the outcome prompt appears the moment a call ends.
-                Until then you will only get a notification.
+                {!readiness.overlay
+                  ? 'Android needs “Display over other apps” before anything can show over the dialer.'
+                  : readiness.needsOemSteps
+                    ? `${readiness.manufacturer} also has its own pop-up and autostart switches.`
+                    : 'One or two settings still need allowing.'}
               </Text>
             </View>
             <Pressable
-              style={({ pressed }) => [styles.popupFixBtn, pressed && { opacity: 0.7 }]}
-              onPress={handleEnableOverlay}
+              style={({ pressed }: { pressed: boolean }) => [styles.popupFixBtn, pressed && { opacity: 0.7 }]}
+              onPress={() => setIsPopupSetupOpen(true)}
             >
-              <Text style={styles.popupFixBtnText}>Allow</Text>
+              <Text style={styles.popupFixBtnText}>Fix now</Text>
             </Pressable>
           </View>
         )}
@@ -864,6 +981,78 @@ const App = (): React.JSX.Element => {
             >
               <Text style={styles.modalCancelText}>Cancel</Text>
             </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Post-Call Popup Setup */}
+      <Modal visible={isPopupSetupOpen} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Post-Call Popup Setup</Text>
+                <Text style={styles.modalSub}>
+                  Android only lets an app show a card over the dialer once these are allowed.
+                </Text>
+              </View>
+              <Pressable onPress={() => setIsPopupSetupOpen(false)}>
+                <Text style={styles.closeModalText}>✕</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView style={{ maxHeight: 460 }}>
+              {readinessSteps.map((step, idx) => (
+                <View key={step.key} style={styles.stepRow}>
+                  <View style={[
+                    styles.stepBadge,
+                    step.ok === true && styles.stepBadgeOk,
+                    step.ok === false && styles.stepBadgeMissing,
+                  ]}>
+                    <Text style={[
+                      styles.stepBadgeText,
+                      step.ok === true && { color: '#047857' },
+                      step.ok === false && { color: '#B91C1C' },
+                    ]}>
+                      {step.ok === true ? '✓' : step.ok === false ? '!' : idx + 1}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingTitle}>
+                      {step.title}
+                      {!step.required && <Text style={styles.settingDesc}>  · recommended</Text>}
+                    </Text>
+                    <Text style={styles.settingDesc}>{step.desc}</Text>
+                  </View>
+                  {step.ok !== true && (
+                    <Pressable
+                      style={({ pressed }: { pressed: boolean }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
+                      onPress={step.action}
+                    >
+                      <Text style={styles.stepBtnText}>{step.cta}</Text>
+                    </Pressable>
+                  )}
+                </View>
+              ))}
+
+              <Pressable style={styles.modalSaveBtn} onPress={handleSimulateCallEnd}>
+                <Text style={styles.modalSaveText}>▶ Test it now</Text>
+              </Pressable>
+              <Text style={styles.settingDesc}>
+                This runs exactly what a real hang-up runs. If the card appears here, it appears after calls.
+              </Text>
+
+              {!!readiness?.lastNote && (
+                <View style={styles.noteBox}>
+                  <Text style={styles.noteBoxTitle}>Last call</Text>
+                  <Text style={styles.noteBoxText}>{readiness.lastNote}</Text>
+                </View>
+              )}
+
+              <Pressable style={styles.modalCancelBtn} onPress={() => { setIsPopupSetupOpen(false); fetchSystemData(); }}>
+                <Text style={styles.modalCancelText}>Done</Text>
+              </Pressable>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -1303,6 +1492,51 @@ const styles = StyleSheet.create({
     color: '#B45309',
     fontWeight: '700',
   },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+  },
+  stepBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    marginTop: 1,
+  },
+  stepBadgeOk: { backgroundColor: '#D1FAE5' },
+  stepBadgeMissing: { backgroundColor: '#FEE2E2' },
+  stepBadgeText: { fontSize: 12, fontWeight: '800', color: '#475569' },
+  stepBtn: {
+    backgroundColor: '#4F46E5',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 7,
+    marginLeft: 10,
+  },
+  stepBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 11 },
+  noteBox: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 12,
+  },
+  noteBoxTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    color: '#64748B',
+    textTransform: 'uppercase',
+  },
+  noteBoxText: { fontSize: 12, color: '#334155', marginTop: 3 },
   simHint: {
     fontSize: 10,
     color: '#94A3B8',

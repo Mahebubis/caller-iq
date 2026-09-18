@@ -68,6 +68,9 @@ class CallSyncWorker(
                 if (sim.label.isNotEmpty()) put("sim_label", sim.label)
                 if (sim.source.isNotEmpty()) put("sim_source", sim.source)
                 if (taggedVia.isNotEmpty()) put("tagged_via", taggedVia)
+                // So the panel can see which phones cannot show the post-call popup, instead of
+                // waiting for someone to notice they are never tagging anything.
+                put("popup_ok", CallIqConfig.popupEnabled(applicationContext) && CallPopupOverlay.canShow(applicationContext))
             }
 
             val url = URL(targetUrl)

@@ -21,20 +21,15 @@ class OutcomeActionReceiver : BroadcastReceiver() {
         if (timestamp <= 0L) return
 
         try {
-            CallSyncWorker.schedule(
+            // Same delivery as the popup: matched on the server by the call's start time, so a tag
+            // made before the call has synced still lands on that call rather than making a new one.
+            TagWorker.schedule(
                 context = app,
-                number = number,
-                callType = intent.getStringExtra("call_type") ?: "UNKNOWN",
-                duration = intent.getLongExtra("duration", 0L),
-                simId = intent.getStringExtra("sim_id") ?: "",
-                timestamp = timestamp,
-                idempotencyKey = intent.getStringExtra("idempotency_key") ?: "${number}_$timestamp",
                 outcome = outcome,
-                simSlot = intent.getIntExtra("sim_slot", 0),
-                simCarrier = intent.getStringExtra("sim_carrier") ?: "",
-                simLabel = intent.getStringExtra("sim_label") ?: "",
-                simSource = intent.getStringExtra("sim_source") ?: "",
-                taggedVia = "notification"
+                number = number,
+                startedMs = timestamp,
+                idempotencyKey = intent.getStringExtra("idempotency_key") ?: "",
+                via = "notification",
             )
             Toast.makeText(app, "Tagged \"$outcome\"", Toast.LENGTH_SHORT).show()
         } catch (e: Throwable) {
