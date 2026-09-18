@@ -59,6 +59,19 @@ object CallPresence {
         send(context, STATE_RINGING)
     }
 
+    /**
+     * The caller's number, learned after the call was already reported as ringing (Android sends
+     * the number in a second broadcast). Updates the dashboard in place — same call, same timer.
+     */
+    fun fillNumber(context: Context, number: String) {
+        val prefs = CallIqConfig.prefs(context)
+        if (prefs.getLong(KEY_STARTED_AT, 0L) <= 0L) return           // no call open
+        if (!(prefs.getString(KEY_NUMBER, "") ?: "").isEmpty()) return // already known
+        prefs.edit().putString(KEY_NUMBER, number).apply()
+        Log.d(TAG, "Learned the caller's number after the first ring")
+        send(context, STATE_RINGING)
+    }
+
     fun onOffHook(context: Context) {
         val prefs = CallIqConfig.prefs(context)
         val now = System.currentTimeMillis()

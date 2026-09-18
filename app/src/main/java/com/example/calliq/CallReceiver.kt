@@ -36,8 +36,15 @@ class CallReceiver : BroadcastReceiver() {
                 if (stateStr == TelephonyManager.EXTRA_STATE_RINGING) {
                     @Suppress("DEPRECATION")
                     val incoming = try { intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER) } catch (e: Throwable) { null }
-                    // A second RINGING for the same call (some OEMs repeat it) must not restart the timer.
+                    /*
+                     * Android delivers RINGING TWICE: once to every app, with no number, and again
+                     * to apps holding READ_CALL_LOG, WITH the caller's number. Treating the repeat
+                     * as a duplicate — which it looks like — throws away the only chance to learn
+                     * who is calling, which is why live calls read "Unknown number". So: the first
+                     * one starts the call, and a later one only fills in the number it carries.
+                     */
                     if (prevState != TelephonyManager.EXTRA_STATE_RINGING) CallPresence.onRinging(app, incoming)
+                    else if (!incoming.isNullOrBlank()) CallPresence.fillNumber(app, incoming)
                 } else if (prevState != TelephonyManager.EXTRA_STATE_OFFHOOK) {
                     CallPresence.onOffHook(app)
                 }
