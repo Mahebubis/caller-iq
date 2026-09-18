@@ -30,5 +30,8 @@ class MainApplication : Application(), ReactApplication {
     override fun onCreate() {
         super.onCreate()
         SoLoader.init(this, false)
+        /* If this process was killed mid-call (OEM cleaner, reboot), the dashboard is still showing
+           that call as live. Close it now that we can see the phone is idle. */
+        CallPresence.clearIfIdle(this)
     }
 }
