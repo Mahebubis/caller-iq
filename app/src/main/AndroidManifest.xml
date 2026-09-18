@@ -16,6 +16,9 @@
          a dialer shows an incoming call. Without the overlay permission this is the only route
          Android leaves open. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Runs the carrier's own balance code (*121# and the like) in the background, per SIM, to
+         read a plan's validity. Android exposes no other way to learn it. -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
 
     <queries>
         <!-- Package visibility declarations for OEM/ColorOS system framework services -->

@@ -33,5 +33,7 @@ class MainApplication : Application(), ReactApplication {
         /* If this process was killed mid-call (OEM cleaner, reboot), the dashboard is still showing
            that call as live. Close it now that we can see the phone is idle. */
         CallPresence.clearIfIdle(this)
+        /* Keeps the panel's SIM register current by itself, when the counselor has allowed it. */
+        if (CallIqConfig.ussdEnabled(this)) UssdWorker.scheduleDaily(this)
     }
 }

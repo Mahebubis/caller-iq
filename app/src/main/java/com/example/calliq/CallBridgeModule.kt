@@ -233,6 +233,100 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /* ── SIM balance over USSD ────────────────────────────────────────────── */
+
+    /** The codes, the switch, and what the operator last said — the SIM balance screen. */
+    @ReactMethod
+    fun getUssdSettings(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            val out = Arguments.createArray()
+            for (info in SimResolver.activeSubscriptions(ctx)) {
+                val slot = info.simSlotIndex + 1
+                val carrier = try { info.carrierName?.toString() ?: "" } catch (e: Throwable) { "" }
+                out.pushMap(Arguments.createMap().apply {
+                    putInt("slot", slot)
+                    putString("carrier", carrier)
+                    putString("code", UssdChecker.codeFor(ctx, slot, carrier))
+                    putString("lastReply", UssdChecker.lastReply(ctx, slot))
+                    putDouble("lastCheckedAt", UssdChecker.lastCheckedAt(ctx, slot).toDouble())
+                })
+            }
+            promise.resolve(Arguments.createMap().apply {
+                putBoolean("supported", UssdChecker.isSupported())
+                putBoolean("enabled", CallIqConfig.ussdEnabled(ctx))
+                putBoolean("callPermission",
+                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED)
+                putArray("sims", out)
+            })
+        } catch (e: Throwable) {
+            promise.reject("ussd_settings_failed", e)
+        }
+    }
+
+    @ReactMethod
+    fun setUssdSettings(enabled: Boolean, promise: Promise) {
+        try {
+            CallIqConfig.prefs(reactApplicationContext).edit()
+                .putBoolean(CallIqConfig.KEY_USSD_ENABLED, enabled).apply()
+            if (enabled) UssdWorker.scheduleDaily(reactApplicationContext) else UssdWorker.cancel(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun setUssdCode(slot: Int, code: String, promise: Promise) {
+        try {
+            UssdChecker.setCode(reactApplicationContext, slot, code)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /** Runs the code now and resolves with whatever the operator replied. */
+    @ReactMethod
+    fun checkSimBalance(slot: Int, promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+                currentActivity?.let {
+                    ActivityCompat.requestPermissions(it, arrayOf(Manifest.permission.CALL_PHONE), 1002)
+                }
+                promise.resolve(Arguments.createMap().apply {
+                    putBoolean("ok", false)
+                    putString("text", "Allow the Phone-calls permission, then try again — the carrier code runs on the line.")
+                })
+                return
+            }
+            var answered = false
+            UssdChecker.check(ctx, slot, object : UssdChecker.Result {
+                override fun onDone(s: Int, ok: Boolean, text: String) {
+                    if (answered) return
+                    answered = true
+                    promise.resolve(Arguments.createMap().apply {
+                        putBoolean("ok", ok)
+                        putString("text", text)
+                    })
+                }
+            })
+            // USSD can hang silently; answer the UI either way.
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (!answered) {
+                    answered = true
+                    promise.resolve(Arguments.createMap().apply {
+                        putBoolean("ok", false)
+                        putString("text", "No reply within 45 seconds. This operator may not answer this code automatically.")
+                    })
+                }
+            }, 45_000)
+        } catch (e: Throwable) {
+            promise.reject("ussd_failed", e)
+        }
+    }
+
     /** Every SIM the phone reports, plus what this app has learned — the SIM diagnostics screen. */
     @ReactMethod
     fun getSimDiagnostics(promise: Promise) {

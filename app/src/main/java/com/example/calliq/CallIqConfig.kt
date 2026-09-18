@@ -66,6 +66,11 @@ object CallIqConfig {
     fun popupNote(context: Context): String = prefs(context).getString(KEY_POPUP_NOTE, "") ?: ""
     fun popupNoteAt(context: Context): Long = prefs(context).getLong(KEY_POPUP_NOTE_AT, 0L)
 
+    /* Automatic SIM balance checks (USSD). Off until switched on: it runs a carrier code on the
+       line, which is the counselor's phone, so it is asked for rather than assumed. */
+    const val KEY_USSD_ENABLED = "USSD_ENABLED"
+    fun ussdEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_USSD_ENABLED, false)
+
     fun popupEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_ENABLED, true)
     fun popupForMissed(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_MISSED, true)
     fun popupTimeoutSec(context: Context): Int = prefs(context).getInt(KEY_POPUP_TIMEOUT, 45).coerceIn(10, 300)

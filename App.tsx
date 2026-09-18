@@ -48,6 +48,21 @@ export interface PopupReadiness {
   lastNoteAt: number;
 }
 
+/** Automatic SIM balance checks: the carrier's own code, run per SIM. */
+export interface UssdSim {
+  slot: number;
+  carrier: string;
+  code: string;
+  lastReply: string;
+  lastCheckedAt: number;
+}
+export interface UssdSettings {
+  supported: boolean;
+  enabled: boolean;
+  callPermission: boolean;
+  sims: UssdSim[];
+}
+
 export interface SimDiagnostics {
   sims?: Array<{ slot: number; subscriptionId: number; carrier: string; displayName: string; number: string }>;
   learned?: { [accountId: string]: number };
@@ -120,6 +135,8 @@ const App = (): React.JSX.Element => {
   const [popupForMissed, setPopupForMissed] = useState<boolean>(true);
   const [popupTimeout, setPopupTimeout] = useState<number>(45);
   const [simDiag, setSimDiag] = useState<SimDiagnostics>({});
+  const [ussd, setUssd] = useState<UssdSettings | null>(null);
+  const [checkingSlot, setCheckingSlot] = useState<number | null>(null);
 
   // Admin Config
   const [syncEndpoint, setSyncEndpoint] = useState<string>('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/log_call.php');
@@ -256,6 +273,12 @@ const App = (): React.JSX.Element => {
       if (CallBridge?.getPopupReadiness) {
         try {
           setReadiness(await withTimeout<any>(CallBridge.getPopupReadiness().catch(() => null), 1500, null));
+        } catch (_) {}
+      }
+
+      if (CallBridge?.getUssdSettings) {
+        try {
+          setUssd(await withTimeout<any>(CallBridge.getUssdSettings().catch(() => null), 1500, null));
         } catch (_) {}
       }
 
@@ -427,6 +450,39 @@ const App = (): React.JSX.Element => {
       setTimeout(fetchSystemData, 1500);
     } catch (err: any) {
       addLog(`Test error: ${err.message || err}`);
+    }
+  };
+
+  /* ── SIM balance over USSD ────────────────────────────────────────────── */
+
+  const toggleUssd = async (on: boolean) => {
+    setUssd((u) => (u ? { ...u, enabled: on } : u));
+    try {
+      await CallBridge?.setUssdSettings?.(on);
+      addLog(on ? 'Daily SIM balance checks switched on.' : 'Daily SIM balance checks switched off.');
+    } catch (err: any) {
+      addLog(`Balance check error: ${err.message || err}`);
+    }
+  };
+
+  const saveUssdCode = async (slot: number, code: string) => {
+    setUssd((u) => (u ? { ...u, sims: u.sims.map((s) => (s.slot === slot ? { ...s, code } : s)) } : u));
+    try { await CallBridge?.setUssdCode?.(slot, code); } catch (_) {}
+  };
+
+  // Runs the carrier's code on that SIM and shows whatever comes back, word for word.
+  const checkBalanceNow = async (slot: number) => {
+    setCheckingSlot(slot);
+    try {
+      const res = await CallBridge?.checkSimBalance?.(slot);
+      const text = res?.text || 'No reply.';
+      addLog(`SIM ${slot}: ${text}`);
+      Alert.alert(res?.ok ? `SIM ${slot} — operator reply` : `SIM ${slot} — no reading`, text);
+      setTimeout(fetchSystemData, 800);
+    } catch (err: any) {
+      Alert.alert('Could not check', err.message || String(err));
+    } finally {
+      setCheckingSlot(null);
     }
   };
 
@@ -1277,6 +1333,62 @@ const App = (): React.JSX.Element => {
                   {Object.keys(simDiag.learned || {}).length === 1 ? '' : 's'} learned from this phone's call log.
                   The feed above shows how each call was matched.
                 </Text>
+
+                {/* ── SIM balance (USSD) ── */}
+                <Text style={[styles.inputLabel, { marginTop: 18 }]}>SIM Balance &amp; Validity</Text>
+                {!ussd?.supported ? (
+                  <Text style={styles.settingDesc}>This phone is too old for automatic balance checks (needs Android 8).</Text>
+                ) : (
+                  <>
+                    <Pressable style={styles.settingRow} onPress={() => toggleUssd(!ussd.enabled)}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.settingTitle}>Check each SIM once a day</Text>
+                        <Text style={styles.settingDesc}>
+                          Runs the operator's own code (like *121#) in the background and sends the reply to the
+                          dashboard. Android tells apps nothing about a balance, so this is the only way to read it.
+                        </Text>
+                      </View>
+                      <View style={[styles.toggle, ussd.enabled && styles.toggleOn]}>
+                        <View style={[styles.toggleKnob, ussd.enabled && styles.toggleKnobOn]} />
+                      </View>
+                    </Pressable>
+
+                    {!ussd.callPermission && (
+                      <Text style={styles.settingDesc}>
+                        The Phone-calls permission is needed — the check runs on the line. Tap “Check now” and allow it.
+                      </Text>
+                    )}
+
+                    {(ussd.sims || []).map((s) => (
+                      <View key={s.slot} style={styles.simDiagRow}>
+                        <Text style={styles.simDiagSlot}>SIM {s.slot}</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.settingTitle}>{s.carrier || `Slot ${s.slot}`}</Text>
+                          <TextInput
+                            style={[styles.modalInput, { marginTop: 6 }]}
+                            value={s.code}
+                            onChangeText={(v) => saveUssdCode(s.slot, v)}
+                            placeholder="*121#"
+                            placeholderTextColor="#94A3B8"
+                            autoCapitalize="none"
+                          />
+                          {!!s.lastReply && <Text style={styles.settingDesc}>Last reply: {s.lastReply}</Text>}
+                        </View>
+                        <Pressable
+                          style={({ pressed }: { pressed: boolean }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
+                          onPress={() => checkBalanceNow(s.slot)}
+                          disabled={checkingSlot === s.slot}
+                        >
+                          <Text style={styles.stepBtnText}>{checkingSlot === s.slot ? '…' : 'Check now'}</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                    <Text style={styles.settingDesc}>
+                      Codes that answer with a menu (“reply 1 for balance”) cannot be read automatically — only
+                      one-shot codes. Jio answers little over USSD; record those by hand in the dashboard.
+                    </Text>
+                  </>
+                )}
 
                 <Text style={[styles.inputLabel, { marginTop: 18 }]}>Live System Console Logs</Text>
                 <View style={styles.logBox}>
