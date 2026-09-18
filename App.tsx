@@ -13,6 +13,7 @@ import {
   Platform,
   ScrollView,
   AppState,
+  BackHandler,
 } from 'react-native';
 
 const { CallBridge } = NativeModules;
@@ -319,6 +320,24 @@ const App = (): React.JSX.Element => {
     setupPrompted.current = true;
     return undefined;
   }, [readiness]);
+
+  /*
+   * Android's back button should close what is open — a sheet, a dialog — and only leave the app
+   * when nothing is. Without this every back press quits mid-task, which on a phone feels broken.
+   */
+  useEffect(() => {
+    const onBack = () => {
+      if (activeDispositionCall) { setActiveDispositionCall(null); return true; }
+      if (isPopupSetupOpen) { setIsPopupSetupOpen(false); return true; }
+      if (isSimModalOpen) { setIsSimModalOpen(false); return true; }
+      if (isAdminModalOpen) { setIsAdminModalOpen(false); return true; }
+      if (searchQuery) { setSearchQuery(''); return true; }
+      if (selectedFilter !== 'ALL') { setSelectedFilter('ALL'); return true; }
+      return false;     // nothing open: let Android leave the app
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
+    return () => sub.remove();
+  }, [activeDispositionCall, isPopupSetupOpen, isSimModalOpen, isAdminModalOpen, searchQuery, selectedFilter]);
 
   // AppState Listener
   useEffect(() => {

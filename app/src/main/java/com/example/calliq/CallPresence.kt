@@ -96,6 +96,35 @@ object CallPresence {
     }
 
     /**
+     * The finished call, once Android has written its row: the real talk time (which for an
+     * outgoing call is the only way to know it was answered at all) and, for an outgoing call, the
+     * number — neither of which exists while the call is running. Sent as a last "ended" update so
+     * the dashboard's card stops guessing and shows the truth.
+     */
+    fun finalise(context: Context, record: CallLogHelper.CallRecord) {
+        val app = context.applicationContext
+        val direction = when {
+            record.callType.startsWith("OUTGOING") -> DIR_OUTGOING
+            record.callType.startsWith("INCOMING") || record.callType.startsWith("MISSED") ||
+                record.callType.startsWith("REJECTED") -> DIR_INCOMING
+            else -> "unknown"
+        }
+        val body = JSONObject().apply {
+            put("device_id", CallIqConfig.deviceId(app))
+            put("state", STATE_ENDED)
+            put("direction", direction)
+            if (record.number.isNotEmpty()) put("number", record.number)
+            put("started_at", record.timestamp)
+            put("event_at", System.currentTimeMillis())
+            put("duration_sec", record.duration)
+            record.sim.slot?.let { put("sim_slot", it) }
+            if (record.sim.carrier.isNotEmpty()) put("carrier", record.sim.carrier)
+            if (record.sim.label.isNotEmpty()) put("sim_label", record.sim.label)
+        }.toString()
+        Thread { post(endpoint(app), body) }.start()
+    }
+
+    /**
      * What we know about the call the instant it ends, WITHOUT waiting for Android to write its
      * call-log row: direction, the caller's number for an incoming call, when it started and
      * whether it was ever answered. This is what the post-call popup opens on.

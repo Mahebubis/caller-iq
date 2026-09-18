@@ -157,7 +157,7 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 return
             }
             CallIqConfig.prefs(reactApplicationContext).edit().remove(CallIqConfig.KEY_LAST_POPUP_KEY).apply()
-            CallPopupOverlay.show(reactApplicationContext, record)
+            CallPopupLauncher.show(reactApplicationContext, record)
             promise.resolve(true)
         } catch (e: Throwable) {
             promise.resolve(false)

@@ -99,6 +99,12 @@ class CallReceiver : BroadcastReceiver() {
 
     private fun syncAndPrompt(app: Context, promptIfNotShowing: Boolean) {
         val record = CallLogHelper.processAndEnqueueRecentCalls(app)
+        /* Now that Android has written the row, tell the dashboard what the call actually was:
+           the real talk time, and — for an outgoing call — the number, neither of which can be
+           known while it is still running. */
+        if (record != null && System.currentTimeMillis() - record.timestamp <= 120_000) {
+            CallPresence.finalise(app, record)
+        }
         if (!promptIfNotShowing || CallPopupOverlay.isShowing()) return
         // Only ever ask about a call that just happened, never about history a catch-up pulled in.
         if (record != null && System.currentTimeMillis() - record.timestamp <= 90_000) maybePrompt(app, record)
@@ -128,7 +134,7 @@ class CallReceiver : BroadcastReceiver() {
             if (prefs.getString(CallIqConfig.KEY_LAST_POPUP_KEY, "") == stamp) return
             prefs.edit().putString(CallIqConfig.KEY_LAST_POPUP_KEY, stamp).apply()
 
-            CallPopupOverlay.show(app, record)
+            CallPopupLauncher.show(app, record)
         }
     }
 }

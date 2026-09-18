@@ -169,6 +169,12 @@ class CallPopupActivity : Activity() {
         finishCard()
     }
 
+    /** Back closes the card, exactly as it closes any dialog — never the counselor's own app. */
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        finishCard()
+    }
+
     private fun finishCard() {
         if (closed) return
         closed = true
