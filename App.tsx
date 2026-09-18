@@ -24,10 +24,35 @@ export interface CallLogItem {
   duration: number; // in seconds
   timestamp: number; // in ms
   simId: string;
+  simSlot?: number;      // 1 or 2; 0 when the SIM could not be identified
+  simCarrier?: string;
+  simSource?: string;    // how the SIM was worked out — see SimResolver.kt
+  rawSimId?: string;     // the phone account id the call log actually stored
   idempotencyKey: string;
   synced?: boolean;
   outcome?: string; // Disposition tag
 }
+
+export interface SimDiagnostics {
+  sims?: Array<{ slot: number; subscriptionId: number; carrier: string; displayName: string; number: string }>;
+  learned?: { [accountId: string]: number };
+  liveSlot?: number;
+  liveAt?: number;
+}
+
+/** Plain-English explanation of how a call's SIM was identified. */
+const SIM_SOURCE_TEXT: { [key: string]: string } = {
+  telecom: 'matched by phone account',
+  account: 'matched by phone account',
+  subid: 'matched by subscription id',
+  iccid: 'matched by SIM ICCID',
+  live: 'captured live during the call',
+  learned: 'remembered from an earlier call',
+  slot: 'reported slot number',
+  single: 'only one SIM in this phone',
+  app: 'set in the app',
+  unknown: 'could not be identified',
+};
 
 export interface SimNicknameMap {
   [key: string]: string;
@@ -71,6 +96,13 @@ const App = (): React.JSX.Element => {
   const [isSimModalOpen, setIsSimModalOpen] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
+
+  // Post-call popup + SIM detection
+  const [overlayGranted, setOverlayGranted] = useState<boolean>(true);
+  const [popupEnabled, setPopupEnabled] = useState<boolean>(true);
+  const [popupForMissed, setPopupForMissed] = useState<boolean>(true);
+  const [popupTimeout, setPopupTimeout] = useState<number>(45);
+  const [simDiag, setSimDiag] = useState<SimDiagnostics>({});
 
   // Admin Config
   const [syncEndpoint, setSyncEndpoint] = useState<string>('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/log_call.php');
@@ -142,12 +174,10 @@ const App = (): React.JSX.Element => {
   };
 
   const getSimLabel = (simIdRaw: string): string => {
-    // simIdRaw is now expected to be strictly "SIM 1" or "SIM 2" passed from Native side.
-    if (!simIdRaw) return simNicknames['SIM 1'] || 'SIM 1';
+    // The native side sends "SIM 1", "SIM 2" or "Unknown SIM" — already resolved, never a guess.
+    if (!simIdRaw) return 'Unknown SIM';
     if (simNicknames[simIdRaw]) return simNicknames[simIdRaw];
-
-    // Fallback just in case
-    return simNicknames['SIM 1'] || simIdRaw;
+    return simIdRaw;
   };
 
   const withTimeout = <T,>(promise: Promise<T>, ms = 1500, fallback: T): Promise<T> => {
@@ -166,8 +196,8 @@ const App = (): React.JSX.Element => {
         return;
       }
 
-      const trackingPromise = CallBridge.getTrackingStatus
-        ? withTimeout(CallBridge.getTrackingStatus().catch(() => null), 1500, null)
+      const trackingPromise: Promise<any> = CallBridge.getTrackingStatus
+        ? withTimeout<any>(CallBridge.getTrackingStatus().catch(() => null), 1500, null)
         : Promise.resolve(null);
 
       const batteryPromise = CallBridge.isBatteryOptimizationIgnored
@@ -200,6 +230,17 @@ const App = (): React.JSX.Element => {
           setSyncEndpoint(statusRes.syncEndpoint);
           setEndpointInput(statusRes.syncEndpoint);
         }
+        if (typeof statusRes.overlayGranted === 'boolean') setOverlayGranted(statusRes.overlayGranted);
+        if (typeof statusRes.popupEnabled === 'boolean') setPopupEnabled(statusRes.popupEnabled);
+        if (typeof statusRes.popupForMissed === 'boolean') setPopupForMissed(statusRes.popupForMissed);
+        if (typeof statusRes.popupTimeoutSec === 'number') setPopupTimeout(statusRes.popupTimeoutSec);
+      }
+
+      if (CallBridge?.getSimDiagnostics) {
+        try {
+          const diagJson = await withTimeout(CallBridge.getSimDiagnostics().catch(() => '{}'), 1500, '{}');
+          setSimDiag(JSON.parse(diagJson || '{}'));
+        } catch (_) {}
       }
 
       if (typeof batteryRes === 'boolean') {
@@ -277,6 +318,50 @@ const App = (): React.JSX.Element => {
       }
     } catch (err: any) {
       addLog(`Permission error: ${err.message || err}`);
+    }
+  };
+
+  /* ── Post-call popup ──────────────────────────────────────────────────── */
+
+  // Android only allows a window over the dialer once "Display over other apps" is granted,
+  // and only the user can grant it — this opens that settings screen.
+  const handleEnableOverlay = async () => {
+    try {
+      if (CallBridge?.requestOverlayPermission) {
+        await CallBridge.requestOverlayPermission();
+        addLog('Opened the "Display over other apps" settings screen.');
+        setTimeout(fetchSystemData, 1500);
+      }
+    } catch (err: any) {
+      addLog(`Overlay permission error: ${err.message || err}`);
+    }
+  };
+
+  const savePopupSettings = async (enabled: boolean, forMissed: boolean, timeoutSec: number) => {
+    setPopupEnabled(enabled);
+    setPopupForMissed(forMissed);
+    setPopupTimeout(timeoutSec);
+    try {
+      if (CallBridge?.setPopupSettings) {
+        await CallBridge.setPopupSettings(enabled, forMissed, timeoutSec);
+        addLog(`Post-call popup ${enabled ? 'enabled' : 'disabled'} (${timeoutSec}s, missed: ${forMissed ? 'yes' : 'no'}).`);
+      }
+    } catch (err: any) {
+      addLog(`Popup settings error: ${err.message || err}`);
+    }
+  };
+
+  const handleTestPopup = async () => {
+    try {
+      if (!CallBridge?.showPopupForLastCall) return;
+      const shown = await CallBridge.showPopupForLastCall();
+      if (shown) {
+        addLog('Test popup shown for the most recent call.');
+      } else {
+        Alert.alert('No recent call', 'Make or receive a call first — the popup shows the last call in the log.');
+      }
+    } catch (err: any) {
+      addLog(`Test popup error: ${err.message || err}`);
     }
   };
 
@@ -511,6 +596,26 @@ const App = (): React.JSX.Element => {
         contentContainerStyle={styles.scrollBody}
         keyboardShouldPersistTaps="always"
       >
+        {/* Post-call popup needs "Display over other apps" — without it the popup cannot
+            appear over the dialer, and only a notification can be shown instead. */}
+        {popupEnabled && !overlayGranted && (
+          <View style={styles.popupWarningCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.popupWarningTitle}>📋 Turn on the post-call popup</Text>
+              <Text style={styles.popupWarningDesc}>
+                Allow "Display over other apps" so the outcome prompt appears the moment a call ends.
+                Until then you will only get a notification.
+              </Text>
+            </View>
+            <Pressable
+              style={({ pressed }) => [styles.popupFixBtn, pressed && { opacity: 0.7 }]}
+              onPress={handleEnableOverlay}
+            >
+              <Text style={styles.popupFixBtnText}>Allow</Text>
+            </Pressable>
+          </View>
+        )}
+
         {/* OEM Battery Saver Warning Card */}
         {!batteryOptIgnored && (
           <View style={styles.batteryWarningCard}>
@@ -680,8 +785,12 @@ const App = (): React.JSX.Element => {
 
                 <View style={styles.callCardBody}>
                   <Text style={styles.callMeta}>
-                    {getSimLabel(item.simId)} • Duration: {formatDuration(item.duration)}
+                    <Text style={item.simSlot ? styles.simOk : styles.simUnknown}>{getSimLabel(item.simId)}</Text>
+                    {item.simCarrier ? ` (${item.simCarrier})` : ''} • Duration: {formatDuration(item.duration)}
                   </Text>
+                  {!item.simSlot && !!item.simSource && (
+                    <Text style={styles.simHint}>SIM {SIM_SOURCE_TEXT[item.simSource] || item.simSource}</Text>
+                  )}
                   <View style={styles.syncIndicatorRow}>
                     <Text
                       style={[
@@ -861,6 +970,92 @@ const App = (): React.JSX.Element => {
                   <Text style={styles.diagActionBtnText}>⚡ Force Flush WorkManager Queue</Text>
                 </Pressable>
 
+                {/* ── Post-call popup ── */}
+                <Text style={[styles.inputLabel, { marginTop: 18 }]}>Post-Call Popup</Text>
+                <Pressable
+                  style={styles.settingRow}
+                  onPress={() => savePopupSettings(!popupEnabled, popupForMissed, popupTimeout)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingTitle}>Ask for the outcome after every call</Text>
+                    <Text style={styles.settingDesc}>
+                      {overlayGranted
+                        ? 'Shows over whatever is on screen when the call ends.'
+                        : 'Needs "Display over other apps" — a notification is used until then.'}
+                    </Text>
+                  </View>
+                  <View style={[styles.toggle, popupEnabled && styles.toggleOn]}>
+                    <View style={[styles.toggleKnob, popupEnabled && styles.toggleKnobOn]} />
+                  </View>
+                </Pressable>
+
+                <Pressable
+                  style={styles.settingRow}
+                  onPress={() => savePopupSettings(popupEnabled, !popupForMissed, popupTimeout)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingTitle}>Also ask after missed &amp; rejected calls</Text>
+                    <Text style={styles.settingDesc}>Useful for scheduling a callback straight away.</Text>
+                  </View>
+                  <View style={[styles.toggle, popupForMissed && styles.toggleOn]}>
+                    <View style={[styles.toggleKnob, popupForMissed && styles.toggleKnobOn]} />
+                  </View>
+                </Pressable>
+
+                <Text style={styles.settingTitle}>Closes itself after</Text>
+                <View style={styles.chipRow}>
+                  {[20, 30, 45, 60, 120].map((sec) => (
+                    <Pressable
+                      key={sec}
+                      style={[styles.choiceChip, popupTimeout === sec && styles.choiceChipOn]}
+                      onPress={() => savePopupSettings(popupEnabled, popupForMissed, sec)}
+                    >
+                      <Text style={[styles.choiceChipText, popupTimeout === sec && styles.choiceChipTextOn]}>{sec}s</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <View style={{ flexDirection: 'row', marginTop: 10 }}>
+                  {!overlayGranted && (
+                    <Pressable style={[styles.diagActionBtn, { flex: 1, marginRight: 8 }]} onPress={handleEnableOverlay}>
+                      <Text style={styles.diagActionBtnText}>Allow display over apps</Text>
+                    </Pressable>
+                  )}
+                  <Pressable style={[styles.diagActionBtn, { flex: 1 }]} onPress={handleTestPopup}>
+                    <Text style={styles.diagActionBtnText}>👁 Preview popup</Text>
+                  </Pressable>
+                </View>
+
+                {/* ── SIM detection ── */}
+                <Text style={[styles.inputLabel, { marginTop: 18 }]}>SIM Detection</Text>
+                {(simDiag.sims || []).length === 0 ? (
+                  <Text style={styles.settingDesc}>
+                    No SIMs reported. Grant the Phone permission so calls can be matched to a SIM.
+                  </Text>
+                ) : (
+                  (simDiag.sims || []).map((s) => (
+                    <View key={s.slot} style={styles.simDiagRow}>
+                      <Text style={styles.simDiagSlot}>SIM {s.slot}</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.settingTitle}>{s.carrier || s.displayName || `Slot ${s.slot}`}</Text>
+                        <Text style={styles.settingDesc}>
+                          sub id {s.subscriptionId}
+                          {s.number ? ` • ${s.number}` : ''}
+                          {simNicknames[`SIM ${s.slot}`] ? ` • ${simNicknames[`SIM ${s.slot}`]}` : ''}
+                        </Text>
+                      </View>
+                    </View>
+                  ))
+                )}
+                {!!simDiag.liveSlot && (
+                  <Text style={styles.settingDesc}>Last call was placed on SIM {simDiag.liveSlot}.</Text>
+                )}
+                <Text style={styles.settingDesc}>
+                  {Object.keys(simDiag.learned || {}).length} phone account
+                  {Object.keys(simDiag.learned || {}).length === 1 ? '' : 's'} learned from this phone's call log.
+                  The feed above shows how each call was matched.
+                </Text>
+
                 <Text style={[styles.inputLabel, { marginTop: 18 }]}>Live System Console Logs</Text>
                 <View style={styles.logBox}>
                   {systemLogs.length === 0 ? (
@@ -977,6 +1172,141 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 11,
+  },
+  /* Post-call popup prompt */
+  popupWarningCard: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#818CF8',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  popupWarningTitle: {
+    color: '#3730A3',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  popupWarningDesc: {
+    color: '#4338CA',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  popupFixBtn: {
+    backgroundColor: '#4F46E5',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 6,
+    marginLeft: 10,
+  },
+  popupFixBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 11,
+  },
+  /* Settings rows in the admin sheet */
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+  },
+  settingTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  settingDesc: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  toggle: {
+    width: 40,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#CBD5E1',
+    padding: 2,
+    marginLeft: 10,
+    justifyContent: 'center',
+  },
+  toggleOn: {
+    backgroundColor: '#4F46E5',
+  },
+  toggleKnob: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FFFFFF',
+  },
+  toggleKnobOn: {
+    alignSelf: 'flex-end',
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 8,
+  },
+  choiceChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+    marginRight: 6,
+    marginBottom: 6,
+  },
+  choiceChipOn: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#818CF8',
+  },
+  choiceChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  choiceChipTextOn: {
+    color: '#4338CA',
+  },
+  simDiagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 6,
+  },
+  simDiagSlot: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#4338CA',
+    backgroundColor: '#EEF2FF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginRight: 10,
+  },
+  simOk: {
+    color: '#0F172A',
+    fontWeight: '700',
+  },
+  simUnknown: {
+    color: '#B45309',
+    fontWeight: '700',
+  },
+  simHint: {
+    fontSize: 10,
+    color: '#94A3B8',
+    marginTop: 2,
   },
   permCard: {
     backgroundColor: '#FFEDD5',

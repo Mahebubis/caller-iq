@@ -55,6 +55,10 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 permissions.add(Manifest.permission.READ_PHONE_NUMBERS)
             }
+            // Android 13+ needs consent before the post-call notification can appear.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
 
             ActivityCompat.requestPermissions(activity, permissions.toTypedArray(), 1001)
             promise.resolve(true)
@@ -78,23 +82,95 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
 
             val permissionsGranted = readCallLog && readPhoneState
 
-            val prefs = reactApplicationContext.getSharedPreferences("call_tracker_prefs", Context.MODE_PRIVATE)
-            val defaultEndpoint = "https://adp.internshipstudio.com/api/log_call.php"
-            val currentEndpoint = prefs.getString("SYNC_ENDPOINT", defaultEndpoint) ?: defaultEndpoint
-
             val result = Arguments.createMap().apply {
                 putBoolean("permissionsGranted", permissionsGranted)
                 putBoolean("trackingActive", permissionsGranted)
-                putString("syncEndpoint", currentEndpoint)
+                putString("syncEndpoint", CallIqConfig.endpoint(reactApplicationContext))
+                // Post-call popup state, so the app can nudge for what is missing.
+                putBoolean("overlayGranted", CallPopupOverlay.canShow(reactApplicationContext))
+                putBoolean("popupEnabled", CallIqConfig.popupEnabled(reactApplicationContext))
+                putBoolean("popupForMissed", CallIqConfig.popupForMissed(reactApplicationContext))
+                putInt("popupTimeoutSec", CallIqConfig.popupTimeoutSec(reactApplicationContext))
+                putInt("simCount", SimResolver.activeSubscriptions(reactApplicationContext).size)
             }
             promise.resolve(result)
         } catch (e: Throwable) {
             val result = Arguments.createMap().apply {
                 putBoolean("permissionsGranted", false)
                 putBoolean("trackingActive", false)
-                putString("syncEndpoint", "https://adp.internshipstudio.com/api/log_call.php")
+                putString("syncEndpoint", CallIqConfig.DEFAULT_ENDPOINT)
+                putBoolean("overlayGranted", false)
+                putBoolean("popupEnabled", true)
+                putBoolean("popupForMissed", true)
+                putInt("popupTimeoutSec", 45)
+                putInt("simCount", 0)
             }
             promise.resolve(result)
+        }
+    }
+
+    /* ── Post-call popup ──────────────────────────────────────────────────── */
+
+    @ReactMethod
+    fun canDrawOverlays(promise: Promise) {
+        promise.resolve(CallPopupOverlay.canShow(reactApplicationContext))
+    }
+
+    /** Opens the system screen; Android gives no way to grant this silently. */
+    @ReactMethod
+    fun requestOverlayPermission(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactApplicationContext)) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${reactApplicationContext.packageName}")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                reactApplicationContext.startActivity(intent)
+            }
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun setPopupSettings(enabled: Boolean, forMissed: Boolean, timeoutSec: Int, promise: Promise) {
+        try {
+            CallIqConfig.prefs(reactApplicationContext).edit()
+                .putBoolean(CallIqConfig.KEY_POPUP_ENABLED, enabled)
+                .putBoolean(CallIqConfig.KEY_POPUP_MISSED, forMissed)
+                .putInt(CallIqConfig.KEY_POPUP_TIMEOUT, timeoutSec)
+                .apply()
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /** Shows the popup for the most recent call, so the counselor can see what it looks like. */
+    @ReactMethod
+    fun showPopupForLastCall(promise: Promise) {
+        try {
+            val record = CallLogHelper.latestCall(reactApplicationContext)
+            if (record == null) {
+                promise.resolve(false)
+                return
+            }
+            CallIqConfig.prefs(reactApplicationContext).edit().remove(CallIqConfig.KEY_LAST_POPUP_KEY).apply()
+            CallPopupOverlay.show(reactApplicationContext, record)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /** Every SIM the phone reports, plus what this app has learned — the SIM diagnostics screen. */
+    @ReactMethod
+    fun getSimDiagnostics(promise: Promise) {
+        try {
+            promise.resolve(SimResolver.diagnostics(reactApplicationContext).toString())
+        } catch (e: Throwable) {
+            promise.resolve("{}")
         }
     }
 
@@ -163,8 +239,10 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 val durationIdx = it.getColumnIndex(CallLog.Calls.DURATION)
                 val dateIdx = it.getColumnIndex(CallLog.Calls.DATE)
                 
-                // Probe for standard and OEM-specific SIM columns
+                // Standard and OEM-specific SIM columns. The component name is what turns
+                // PHONE_ACCOUNT_ID into a real PhoneAccountHandle — see SimResolver.
                 val simIdIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
+                val componentIdx = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_COMPONENT_NAME)
                 val subIdIdx = it.getColumnIndex("subscription_id")
                 val subIdAltIdx = it.getColumnIndex("sub_id")
                 val simIdOemIdx = it.getColumnIndex("simid")
@@ -178,25 +256,17 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                     val duration = if (durationIdx != -1) it.getLong(durationIdx) else 0L
                     val date = if (dateIdx != -1) it.getLong(dateIdx) else System.currentTimeMillis()
 
-                    var rawSimId: String? = null
-                    
                     val phoneAccountId = if (simIdIdx != -1) it.getString(simIdIdx) else null
+                    val component = if (componentIdx != -1) it.getString(componentIdx) else null
                     val subId = if (subIdIdx != -1) it.getString(subIdIdx) else null
                     val subIdAlt = if (subIdAltIdx != -1) it.getString(subIdAltIdx) else null
                     val simIdOem = if (simIdOemIdx != -1) it.getString(simIdOemIdx) else null
                     val simIdOemAlt = if (simIdOemAltIdx != -1) it.getString(simIdOemAltIdx) else null
 
-                    if (!phoneAccountId.isNullOrBlank()) rawSimId = phoneAccountId
-                    else if (!subId.isNullOrBlank()) rawSimId = subId
-                    else if (!subIdAlt.isNullOrBlank()) rawSimId = subIdAlt
-                    else if (!simIdOem.isNullOrBlank()) rawSimId = simIdOem
-                    else if (!simIdOemAlt.isNullOrBlank()) rawSimId = simIdOemAlt
+                    val rawSimId = listOf(phoneAccountId, subId, subIdAlt, simIdOem, simIdOemAlt)
+                        .firstOrNull { v -> !v.isNullOrBlank() } ?: ""
 
-                    val simIdRawToPass = rawSimId ?: "0"
-                    
-                    // Route through the new unified resolver to get a clean "SIM 1" or "SIM 2"
-                    val resolvedSim = CallIqConfig.resolveSim(reactApplicationContext, simIdRawToPass)
-                    val simIdStr = "SIM ${resolvedSim.slot}"
+                    val sim = SimResolver.resolve(reactApplicationContext, rawSimId, component, date)
 
                     val callTypeStr = when (rawType) {
                         CallLog.Calls.INCOMING_TYPE -> "INCOMING"
@@ -213,7 +283,13 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                         putString("callType", callTypeStr)
                         putDouble("duration", duration.toDouble())
                         putDouble("timestamp", date.toDouble())
-                        putString("simId", simIdStr)
+                        // "SIM 1" / "SIM 2", or "Unknown SIM" when nothing could identify it —
+                        // never a guess dressed up as a fact.
+                        putString("simId", if (sim.slot != null) "SIM ${sim.slot}" else "Unknown SIM")
+                        putInt("simSlot", sim.slot ?: 0)
+                        putString("simCarrier", sim.carrier)
+                        putString("simSource", sim.source)
+                        putString("rawSimId", rawSimId)
                         putString("idempotencyKey", idempotencyKey)
                     }
                     array.pushMap(item)
@@ -292,6 +368,9 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
+            // simId here is the display label the JS list holds ("SIM 2"), not a phone-account id,
+            // so re-read the slot from it and let the worker keep whatever it already knows.
+            val slot = Regex("(\\d+)").find(simId)?.value?.toIntOrNull() ?: 0
             CallSyncWorker.schedule(
                 context = reactApplicationContext,
                 number = number,
@@ -300,7 +379,11 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 simId = simId,
                 timestamp = timestamp.toLong(),
                 idempotencyKey = idempotencyKey,
-                outcome = outcome
+                outcome = outcome,
+                simSlot = slot,
+                // No sim_source: this path re-sends a call the server already knows, and the
+                // original detection source must not be overwritten with a weaker one.
+                taggedVia = "app"
             )
             promise.resolve(true)
         } catch (e: Throwable) {

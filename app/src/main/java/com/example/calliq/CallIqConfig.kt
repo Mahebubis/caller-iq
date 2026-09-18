@@ -1,18 +1,15 @@
 package com.example.calliq
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
 import android.provider.Settings
-import android.telephony.SubscriptionManager
-import org.json.JSONObject
 
 /**
- * Where calls are sent, and who is sending them.
+ * Where calls are sent, who is sending them, and how the post-call popup behaves.
  *
- * The admin panel (Caller IQ page) groups calls per phone using device_id, so every
- * payload carries the handset's ANDROID_ID, model and app version, plus the SIM slot,
- * carrier and the nickname the counselor gave that slot.
+ * The admin panel (Caller IQ page) groups calls per phone using device_id, so every payload
+ * carries the handset's ANDROID_ID, model and app version, plus the SIM slot, carrier and the
+ * nickname the counselor gave that slot. SIM detection itself lives in [SimResolver].
  */
 object CallIqConfig {
     const val PREFS = "call_tracker_prefs"
@@ -21,8 +18,27 @@ object CallIqConfig {
     /** The first build's default. Installs still holding it are moved to the live endpoint. */
     private const val LEGACY_ENDPOINT = "https://adp.internshipstudio.com/api/log_call.php"
 
+    /* Post-call popup */
+    const val KEY_POPUP_ENABLED = "POPUP_ENABLED"
+    const val KEY_POPUP_MISSED = "POPUP_FOR_MISSED"
+    const val KEY_POPUP_TIMEOUT = "POPUP_TIMEOUT_SEC"
+    const val KEY_LAST_POPUP_KEY = "LAST_POPUP_KEY"
+
+    /** The one-tap outcomes offered on the popup — the same seven the app's own dialog shows. */
+    val DISPOSITIONS: List<Pair<String, String>> = listOf(
+        "Interested" to "#059669",
+        "Enrolled" to "#7C3AED",
+        "Callback Scheduled" to "#D97706",
+        "Resolved" to "#0891B2",
+        "Not Answering" to "#DC2626",
+        "Course Query" to "#4F46E5",
+        "Escalated to Tech" to "#DB2777",
+    )
+
+    fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
     fun endpoint(context: Context): String {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("SYNC_ENDPOINT", null)
+        val stored = prefs(context).getString("SYNC_ENDPOINT", null)
         return if (stored.isNullOrBlank() || stored == LEGACY_ENDPOINT) DEFAULT_ENDPOINT else stored
     }
 
@@ -34,75 +50,10 @@ object CallIqConfig {
     fun appVersion(context: Context): String =
         try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" } catch (e: Throwable) { "" }
 
-    data class SimInfo(val slot: Int?, val carrier: String, val label: String)
+    fun popupEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_ENABLED, true)
+    fun popupForMissed(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_MISSED, true)
+    fun popupTimeoutSec(context: Context): Int = prefs(context).getInt(KEY_POPUP_TIMEOUT, 45).coerceIn(10, 300)
 
-    /**
-     * The call log's SIM column is a phone-account id: usually the subscription id, sometimes
-     * the ICCID, and "0"/"1" on a few OEMs. Map it back to a physical slot (1 or 2).
-     */
-    @SuppressLint("MissingPermission")
-    fun resolveSim(context: Context, rawSimId: String): SimInfo {
-        var slot: Int? = null
-        var carrier = ""
-        
-        try {
-            val sm = context.getSystemService(SubscriptionManager::class.java)
-            val subs = sm?.activeSubscriptionInfoList ?: emptyList()
-            
-            // Pass 1: Try strict matching on ICCID (PHONE_ACCOUNT_ID usually holds this on OnePlus/Oppo/Samsung)
-            for (info in subs) {
-                val iccId = info.iccId ?: ""
-                if (iccId.isNotEmpty() && rawSimId.length > 5 && (rawSimId.contains(iccId) || iccId.contains(rawSimId))) {
-                    slot = info.simSlotIndex + 1
-                    carrier = info.carrierName?.toString() ?: ""
-                    break
-                }
-            }
-            
-            // Pass 2: Try strict matching on Subscription ID (Standard Android Behavior)
-            if (slot == null) {
-                for (info in subs) {
-                    if (info.subscriptionId.toString() == rawSimId) {
-                        slot = info.simSlotIndex + 1
-                        carrier = info.carrierName?.toString() ?: ""
-                        break
-                    }
-                }
-            }
-            
-            // Pass 3: Try matching on OEM simSlot values (e.g. 0/1 or 1/2)
-            if (slot == null) {
-                val parsedRaw = rawSimId.toIntOrNull()
-                if (parsedRaw != null) {
-                    for (info in subs) {
-                        // Some OEMs use 0-indexed (0=SIM1), some use 1-indexed (1=SIM1)
-                        if (parsedRaw == info.simSlotIndex || parsedRaw == (info.simSlotIndex + 1)) {
-                            slot = info.simSlotIndex + 1
-                            carrier = info.carrierName?.toString() ?: ""
-                            break
-                        }
-                    }
-                }
-            }
-        } catch (e: Throwable) {
-            // READ_PHONE_STATE or READ_PHONE_NUMBERS missing or OEM restriction.
-        }
-
-        // Pass 4: Blind Fallback if SubscriptionManager completely failed or was blocked by OS
-        if (slot == null) {
-            val parsedRaw = rawSimId.toIntOrNull()
-            if (parsedRaw == 0) slot = 1
-            else if (parsedRaw == 1) slot = 2 // Most AOSP consider 1 as SIM 2
-            else if (parsedRaw == 2) slot = 2 // OnePlus considers 2 as SIM 2
-            else slot = 1 // Ultimate fallback
-        }
-
-        var label = ""
-        try {
-            val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("SIM_NICKNAMES", "{}") ?: "{}"
-            label = JSONObject(json).optString("SIM $slot", "")
-        } catch (e: Throwable) { }
-        
-        return SimInfo(slot, carrier, label)
-    }
+    /** Kept so older callers still compile; SIM logic lives in [SimResolver]. */
+    fun resolveSim(context: Context, rawSimId: String): SimResolver.Sim = SimResolver.resolve(context, rawSimId)
 }

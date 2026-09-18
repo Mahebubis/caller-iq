@@ -8,6 +8,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- The post-call popup. SYSTEM_ALERT_WINDOW is what lets it appear over the dialer or the
+         launcher the moment a call ends; POST_NOTIFICATIONS covers the notification fallback. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <queries>
         <!-- Package visibility declarations for OEM/ColorOS system framework services -->
         <package android:name="com.oplus.aiseal" />
@@ -47,6 +52,16 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Outcome buttons on the post-call notification. Not exported: only our own
+             PendingIntents fire it. -->
+        <receiver
+            android:name=".OutcomeActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.calliq.TAG_OUTCOME" />
             </intent-filter>
         </receiver>
 

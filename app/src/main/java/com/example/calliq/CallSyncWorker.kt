@@ -24,9 +24,27 @@ class CallSyncWorker(
         val timestamp = inputData.getLong("timestamp", System.currentTimeMillis())
         val idempotencyKey = inputData.getString("idempotency_key") ?: "${number}_${timestamp}"
         val outcome = inputData.getString("outcome") ?: ""
+        val taggedVia = inputData.getString("tagged_via") ?: ""
 
         val targetUrl = CallIqConfig.endpoint(applicationContext)
-        val sim = CallIqConfig.resolveSim(applicationContext, simId)
+
+        /*
+         * The SIM is resolved when the call is queued and carried here, because by the time this
+         * worker runs the live "which SIM is busy" capture may have expired. Only fall back to
+         * resolving now for work queued by an older build, which carries no slot.
+         */
+        val passedSlot = inputData.getInt("sim_slot", 0)
+        val sim = if (passedSlot > 0 || inputData.getString("sim_source") != null) {
+            SimResolver.Sim(
+                slot = if (passedSlot > 0) passedSlot else null,
+                carrier = inputData.getString("sim_carrier") ?: "",
+                label = inputData.getString("sim_label") ?: "",
+                source = inputData.getString("sim_source") ?: "",
+                subId = null,
+            )
+        } else {
+            SimResolver.resolve(applicationContext, simId)
+        }
 
         Log.d("CallSyncWorker", "Executing call log sync for idempotency_key=$idempotencyKey to $targetUrl")
 
@@ -48,6 +66,8 @@ class CallSyncWorker(
                 sim.slot?.let { put("sim_slot", it) }
                 if (sim.carrier.isNotEmpty()) put("carrier", sim.carrier)
                 if (sim.label.isNotEmpty()) put("sim_label", sim.label)
+                if (sim.source.isNotEmpty()) put("sim_source", sim.source)
+                if (taggedVia.isNotEmpty()) put("tagged_via", taggedVia)
             }
 
             val url = URL(targetUrl)
@@ -89,7 +109,12 @@ class CallSyncWorker(
             simId: String,
             timestamp: Long,
             idempotencyKey: String,
-            outcome: String = ""
+            outcome: String = "",
+            simSlot: Int = 0,
+            simCarrier: String = "",
+            simLabel: String = "",
+            simSource: String = "",
+            taggedVia: String = ""
         ) {
             // A plain re-sync must never cancel a queued outcome upload for the same call
             // (the log is re-read after every call), so only outcome syncs replace.
@@ -101,7 +126,12 @@ class CallSyncWorker(
                 "sim_id" to simId,
                 "timestamp" to timestamp,
                 "idempotency_key" to idempotencyKey,
-                "outcome" to outcome
+                "outcome" to outcome,
+                "sim_slot" to simSlot,
+                "sim_carrier" to simCarrier,
+                "sim_label" to simLabel,
+                "sim_source" to simSource,
+                "tagged_via" to taggedVia
             )
 
             val constraints = Constraints.Builder()
