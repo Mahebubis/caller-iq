@@ -52,6 +52,9 @@ object SimResolver {
         val label: String,       // the counselor's nickname for that slot
         val source: String,
         val subId: Int?,
+        /** The SIM's OWN number, when the network wrote it to the card. Often blank — many Indian
+         *  SIMs carry no MSISDN — so the panel lets it be filled in by hand. */
+        val msisdn: String = "",
     ) {
         val display: String get() = if (slot == null) "Unknown SIM" else label.ifEmpty { "SIM $slot" }
     }
@@ -68,6 +71,12 @@ object SimResolver {
 
     private fun slotOf(info: SubscriptionInfo) = info.simSlotIndex + 1
     private fun carrierOf(info: SubscriptionInfo) = try { info.carrierName?.toString() ?: "" } catch (e: Throwable) { "" }
+    @SuppressLint("MissingPermission")
+    private fun numberOf(info: SubscriptionInfo) = try { info.number ?: "" } catch (e: Throwable) { "" }
+
+    /** The SIM in a given slot, for the details the panel keeps per SIM. */
+    fun infoForSlot(context: Context, slot: Int?): SubscriptionInfo? =
+        if (slot == null) null else activeSubscriptions(context).firstOrNull { slotOf(it) == slot }
 
     /* ── Live capture: which SIM is busy right now ────────────────────────── */
 
@@ -211,7 +220,8 @@ object SimResolver {
                 label = JSONObject(json).optString("SIM $slot", "")
             } catch (e: Throwable) { }
         }
-        return Sim(slot, carrier, label, source, subId)
+        val msisdn = infoForSlot(context, slot)?.let { numberOf(it) } ?: ""
+        return Sim(slot, carrier, label, source, subId, msisdn)
     }
 
     /** What the in-app diagnostics screen shows: every SIM the phone reports, as we see it. */

@@ -97,6 +97,7 @@ class CallPopupActivity : Activity() {
         (card.root as? FrameLayout)?.let { addCountdown(it, timeout) }
         main.postDelayed({ finishCard() }, timeout)
 
+        lastShownAt = System.currentTimeMillis()
         CallPopupNotifier.cancel(this)
         CallIqConfig.notePopup(this, "opened the full popup screen")
 
@@ -190,6 +191,11 @@ class CallPopupActivity : Activity() {
     }
 
     companion object {
+        /** When this screen last actually appeared, so the launcher can tell a silent block apart. */
+        @Volatile private var lastShownAt: Long = 0L
+
+        fun shownSince(ms: Long): Boolean = lastShownAt >= ms
+
         /** Everything the card needs, carried in the intent — no shared state to go stale. */
         fun intentFor(context: Context, call: CallLogHelper.CallRecord): Intent =
             Intent(context, CallPopupActivity::class.java).apply {

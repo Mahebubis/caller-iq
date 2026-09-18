@@ -67,6 +67,9 @@ class CallSyncWorker(
                 if (sim.carrier.isNotEmpty()) put("carrier", sim.carrier)
                 if (sim.label.isNotEmpty()) put("sim_label", sim.label)
                 if (sim.source.isNotEmpty()) put("sim_source", sim.source)
+                // The SIM's own number, so the panel's SIM register fills itself in where the
+                // network wrote one to the card.
+                if (sim.msisdn.isNotEmpty()) put("sim_msisdn", sim.msisdn)
                 if (taggedVia.isNotEmpty()) put("tagged_via", taggedVia)
                 // So the panel can see which phones cannot show the post-call popup, instead of
                 // waiting for someone to notice they are never tagging anything.

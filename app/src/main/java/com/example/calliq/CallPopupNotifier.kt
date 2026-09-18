@@ -81,6 +81,9 @@ object CallPopupNotifier {
                     }
                 }
                 setOnClickPendingIntent(R.id.ciq_open, popup)
+                // The footer doubles as the way out of notifications: one tap to the setting that
+                // turns this into a real popup.
+                setTextViewText(R.id.ciq_open, "Open the full popup  ·  turn on instant popups")
             }
 
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -88,7 +91,8 @@ object CallPopupNotifier {
 
             builder.setSmallIcon(android.R.drawable.sym_action_call)
                 .setContentTitle(title)
-                .setContentText("$meta — tag this call")
+                // Says why this is a notification and not the popup, because the fix is one tap away.
+                .setContentText("$meta — tap to tag · allow “Display over other apps” for the instant popup")
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(Notification.CATEGORY_CALL)
