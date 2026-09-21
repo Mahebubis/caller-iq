@@ -33,7 +33,7 @@ object CallLogHelper {
      * The SIM is resolved HERE rather than inside the worker: the worker can run minutes later,
      * on a different network, by which time the live "which SIM is busy" capture has expired.
      */
-    fun processAndEnqueueRecentCalls(context: Context): CallRecord? {
+    fun processAndEnqueueRecentCalls(context: Context, sinceOverride: Long? = null): CallRecord? {
         val contentResolver = context.contentResolver
         val prefs = context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
@@ -45,7 +45,8 @@ object CallLogHelper {
          * idempotency_key, so a re-sent call is harmless. First run looks back 3 days.
          */
         val lastQueued = prefs.getLong("LAST_QUEUED_CALL_TS", 0L)
-        val since = if (lastQueued > 0) maxOf(lastQueued - 10 * 60 * 1000, now - 7L * 24 * 3600 * 1000)
+        // sinceOverride: a one-off look further back, e.g. to re-send calls whose SIM was unknown.
+        val since = sinceOverride ?: if (lastQueued > 0) maxOf(lastQueued - 10 * 60 * 1000, now - 7L * 24 * 3600 * 1000)
                     else now - 3L * 24 * 3600 * 1000
         var newest = lastQueued
         var newestRecord: CallRecord? = null
@@ -96,7 +97,8 @@ object CallLogHelper {
                     val rawSimId = listOf(phoneAccountId, subId, subIdAlt, simIdOem, simIdOemAlt)
                         .firstOrNull { v -> !v.isNullOrBlank() } ?: ""
 
-                    val sim = SimResolver.resolve(context, rawSimId, component, date)
+                    val sim = SimResolver.resolve(context, rawSimId, component, date,
+                        oemIds = listOf(subId, subIdAlt, simIdOem, simIdOemAlt))
 
                     val callTypeStr = when (rawType) {
                         CallLog.Calls.INCOMING_TYPE -> "INCOMING"
@@ -190,6 +192,8 @@ object CallLogHelper {
                 val date = it.getColumnIndex(CallLog.Calls.DATE).let { i -> if (i != -1) it.getLong(i) else System.currentTimeMillis() }
                 val account = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID).let { i -> if (i != -1) it.getString(i) ?: "" else "" }
                 val component = it.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_COMPONENT_NAME).let { i -> if (i != -1) it.getString(i) else null }
+                val oemIds = listOf("subscription_id", "sub_id", "simid", "sim_id")
+                    .map { c -> it.getColumnIndex(c).let { i -> if (i != -1) it.getString(i) else null } }
                 val callTypeStr = when (rawType) {
                     CallLog.Calls.INCOMING_TYPE -> "INCOMING"
                     CallLog.Calls.OUTGOING_TYPE -> "OUTGOING"
@@ -198,7 +202,7 @@ object CallLogHelper {
                     else -> "UNKNOWN_TYPE_$rawType"
                 }
                 return CallRecord(number, callTypeStr, duration, date, "${number}_${date}", account,
-                    SimResolver.resolve(context, account, component, date))
+                    SimResolver.resolve(context, account, component, date, oemIds = oemIds))
             }
         } catch (e: Throwable) {
             Log.e("CallLogHelper", "latestCall failed: ${e.message}", e)

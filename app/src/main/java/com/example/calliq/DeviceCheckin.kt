@@ -83,6 +83,9 @@ object DeviceCheckin {
                 // Is CallIQ being kept alive between calls? Without it live calls go missing.
                 put("monitor_enabled", CallIqConfig.monitorEnabled(ctx))
                 put("monitor", CallMonitorService.isRunning)
+                // How this phone tells its SIMs apart (see SimResolver), and what it holds when it cannot.
+                put("sim_method", p.getString(SimResolver.KEY_LAST_SOURCE, "") ?: "")
+                put("sim_unresolved", p.getString(SimResolver.KEY_LAST_UNRESOLVED, "") ?: "")
                 if (pending != null) put("pending_uploads", pending)
             })
         }
@@ -99,6 +102,7 @@ object DeviceCheckin {
         SetupState.steps(ctx).forEach { append('|').append(it.key).append('=').append(it.status) }
         append('|').append(CallIqConfig.endpoint(ctx))
         append('|').append(CallIqConfig.monitorEnabled(ctx)).append(CallMonitorService.isRunning)
+        append('|').append(CallIqConfig.prefs(ctx).getString(SimResolver.KEY_LAST_SOURCE, ""))
     }
 
     /** Cheap and local: queues a check-in only when something changed, or the heartbeat is due. */

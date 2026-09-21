@@ -114,6 +114,9 @@ export interface SimDiagnostics {
 const SIM_SOURCE_TEXT: { [key: string]: string } = {
   telecom: 'matched by phone account',
   account: 'matched by phone account',
+  exact: 'matched exactly by the phone',
+  label: 'matched by SIM name',
+  oem: "from the phone maker's SIM column",
   subid: 'matched by subscription id',
   iccid: 'matched by SIM ICCID',
   live: 'captured live during the call',

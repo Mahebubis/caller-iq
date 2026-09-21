@@ -560,7 +560,8 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                     val rawSimId = listOf(phoneAccountId, subId, subIdAlt, simIdOem, simIdOemAlt)
                         .firstOrNull { v -> !v.isNullOrBlank() } ?: ""
 
-                    val sim = SimResolver.resolve(reactApplicationContext, rawSimId, component, date)
+                    val sim = SimResolver.resolve(reactApplicationContext, rawSimId, component, date,
+                        oemIds = listOf(subId, subIdAlt, simIdOem, simIdOemAlt))
 
                     val callTypeStr = when (rawType) {
                         CallLog.Calls.INCOMING_TYPE -> "INCOMING"

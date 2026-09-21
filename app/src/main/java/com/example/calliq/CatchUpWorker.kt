@@ -27,6 +27,19 @@ class CatchUpWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
         CallIqConfig.prefs(app).edit().putLong(DeviceCheckin.KEY_BG_RUN_AT, System.currentTimeMillis()).apply()
 
         if (SetupState.phoneGranted(app)) {
+            /*
+             * Once per install of this build: re-send the last 7 days. Earlier builds could not tell
+             * the SIMs apart on Android 10 phones and uploaded those calls as "Unknown SIM"; the
+             * server fills a missing SIM in on a re-send (never erasing one, never touching an
+             * outcome), so this repairs them. A single pass, then never again.
+             */
+            val prefs = CallIqConfig.prefs(app)
+            if (!prefs.getBoolean(KEY_SIM_BACKFILL, false)) {
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) SimResolver.forgetLearned(app)
+                CallLogHelper.processAndEnqueueRecentCalls(app, sinceOverride = System.currentTimeMillis() - 7L * 24 * 3600 * 1000)
+                prefs.edit().putBoolean(KEY_SIM_BACKFILL, true).apply()
+                Log.d(TAG, "re-sent the last 7 days with SIMs resolved")
+            }
             val newest = CallLogHelper.newestCallAt(app)
             if (newest > CallLogHelper.lastQueuedAt(app)) {
                 Log.d(TAG, "calls the broadcast missed — catching up")
@@ -41,6 +54,7 @@ class CatchUpWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
     companion object {
         private const val TAG = "CatchUpWorker"
         private const val WORK = "caller_iq_catchup"
+        private const val KEY_SIM_BACKFILL = "SIM_BACKFILL_V6"
 
         /** Idempotent — safe on every app start; KEEP leaves an existing schedule alone. */
         fun schedule(context: Context) {

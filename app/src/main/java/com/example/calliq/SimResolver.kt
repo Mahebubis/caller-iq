@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.os.Build
+import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.SubscriptionInfo
@@ -42,6 +43,8 @@ object SimResolver {
     private const val KEY_LIVE_SLOT = "SIM_LIVE_SLOT"
     private const val KEY_LIVE_SUB = "SIM_LIVE_SUB"
     private const val KEY_LIVE_AT = "SIM_LIVE_AT"
+    const val KEY_LAST_SOURCE = "SIM_LAST_SOURCE"
+    const val KEY_LAST_UNRESOLVED = "SIM_LAST_UNRESOLVED"
 
     /** A call is matched to a live capture only if the capture is this close to it. */
     private const val LIVE_WINDOW_MS = 5 * 60 * 1000L
@@ -91,13 +94,7 @@ object SimResolver {
             val subs = activeSubscriptions(context)
             if (subs.size < 2) return   // single SIM: nothing to disambiguate
             for (info in subs) {
-                val tm = context.getSystemService(TelephonyManager::class.java)
-                    ?.createForSubscriptionId(info.subscriptionId) ?: continue
-                val state = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    tm.callStateForSubscription
-                } else {
-                    @Suppress("DEPRECATION") tm.callState
-                }
+                val state = callStateOf(context, info.subscriptionId) ?: return   // cannot tell: never guess
                 if (state != TelephonyManager.CALL_STATE_IDLE) {
                     context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE).edit()
                         .putInt(KEY_LIVE_SLOT, slotOf(info))
@@ -113,11 +110,45 @@ object SimResolver {
         }
     }
 
+    /**
+     * The call state of ONE subscription — or null when this Android cannot say.
+     *
+     * Before Android 12 there is no public per-SIM call state: `callState` on a per-SIM
+     * TelephonyManager quietly reports the whole PHONE's state, so every SIM looks busy and the
+     * capture always picked whichever SIM was listed first — confidently wrong. Those versions do
+     * have a per-subscription getCallState(int) inside TelephonyManager (present since Android 7);
+     * it is used when it answers, and otherwise the capture is skipped rather than guessed.
+     */
+    @SuppressLint("MissingPermission")
+    private fun callStateOf(context: Context, subId: Int): Int? {
+        val tm = context.getSystemService(TelephonyManager::class.java) ?: return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return try { tm.createForSubscriptionId(subId).callStateForSubscription } catch (e: Throwable) { null }
+        }
+        return try {
+            TelephonyManager::class.java.getMethod("getCallState", Int::class.javaPrimitiveType).invoke(tm, subId) as? Int
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
     /* ── Learned map ──────────────────────────────────────────────────────── */
 
     private fun learned(context: Context): JSONObject = try {
         JSONObject(context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE).getString(KEY_LEARNED, "{}") ?: "{}")
     } catch (e: Throwable) { JSONObject() }
+
+    /**
+     * Forget every learned mapping and live capture. Before Android 12 the old capture read the whole
+     * phone's call state as each SIM's, so what earlier builds learned from it may name the wrong
+     * SIM; wiped once, it is relearned from the exact methods above.
+     */
+    fun forgetLearned(context: Context) {
+        try {
+            context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE).edit()
+                .remove(KEY_LEARNED).remove(KEY_LIVE_SLOT).remove(KEY_LIVE_SUB).remove(KEY_LIVE_AT).apply()
+        } catch (e: Throwable) { }
+    }
 
     private fun learn(context: Context, accountId: String, slot: Int) {
         if (accountId.isBlank()) return
@@ -139,7 +170,14 @@ object SimResolver {
      * @param callTimeMs    when the call happened, used to match a live capture
      */
     @SuppressLint("MissingPermission")
-    fun resolve(context: Context, accountId: String?, componentName: String? = null, callTimeMs: Long = 0L): Sim {
+    fun resolve(
+        context: Context,
+        accountId: String?,
+        componentName: String? = null,
+        callTimeMs: Long = 0L,
+        /** The maker's own SIM columns from the same call-log row, if it has any. */
+        oemIds: List<String?> = emptyList(),
+    ): Sim {
         val raw = (accountId ?: "").trim()
         val subs = activeSubscriptions(context)
 
@@ -166,6 +204,32 @@ object SimResolver {
                     if (info != null) return finish(context, slotOf(info), carrierOf(info), source, subId, raw)
                 } catch (e: Throwable) {
                     Log.w(TAG, "getSubscriptionId failed: ${e.message}")
+                }
+            }
+        }
+
+        /*
+         * 2b — Android 10 and older (and any phone where the above found nothing).
+         *
+         * On these versions PHONE_ACCOUNT_ID is the SIM card's ICCID, and ordinary apps may no
+         * longer read ICCIDs to compare it with — which is why a Redmi on Android 10 showed every
+         * call as "Unknown SIM". But the phone's own Telephony service can still do the match:
+         *   exact    its getSubIdForPhoneAccount() — hidden, but present and callable since
+         *            Android 6 — matches the account against the SIM card itself;
+         *   label    failing that, the phone account carries the SIM's display name, colour and
+         *            (sometimes) number, which are compared with each SIM's own. Used only when
+         *            exactly ONE SIM matches — two SIMs both called "Jio" prove nothing.
+         */
+        if (raw.isNotEmpty()) {
+            for (handle in handlesFor(context, raw, componentName)) {
+                val subId = subIdViaTelephony(context, handle)
+                subs.firstOrNull { it.subscriptionId == subId }?.let {
+                    return finish(context, slotOf(it), carrierOf(it), "exact", it.subscriptionId, raw)
+                }
+            }
+            for (handle in handlesFor(context, raw, componentName)) {
+                subViaAccountDetails(context, handle, subs)?.let {
+                    return finish(context, slotOf(it), carrierOf(it), "label", it.subscriptionId, raw)
                 }
             }
         }
@@ -200,6 +264,20 @@ object SimResolver {
             return finish(context, remembered, carrier, "learned", null, raw, learnIt = false)
         }
 
+        /*
+         * 6b — the maker's own SIM column. Xiaomi, MediaTek and others add one to the call log
+         * ("simid", "sub_id", "subscription_id") holding the subscription id. It was ignored
+         * whenever PHONE_ACCOUNT_ID was filled in. Some makers store the SLOT there instead, so a
+         * value that could be read either way — and would mean different SIMs — is not trusted.
+         */
+        for (v in oemIds.mapNotNull { it?.trim()?.takeIf { s -> s.isNotEmpty() && s != raw } }.distinct()) {
+            val n = v.toIntOrNull() ?: continue
+            val bySub = subs.firstOrNull { it.subscriptionId == n } ?: continue
+            val bySlot = subs.firstOrNull { it.simSlotIndex == n } ?: subs.firstOrNull { slotOf(it) == n }
+            if (bySlot != null && bySlot.subscriptionId != bySub.subscriptionId) continue   // ambiguous
+            return finish(context, slotOf(bySub), carrierOf(bySub), "oem", bySub.subscriptionId, raw)
+        }
+
         // 7 — the account id is a slot number. Both 0-based and 1-based OEMs exist, so trust it
         //     only when it lines up with a slot the phone actually has.
         raw.toIntOrNull()?.let { n ->
@@ -208,10 +286,82 @@ object SimResolver {
         }
 
         Log.w(TAG, "Could not resolve SIM for phone account '$raw' (${subs.size} active SIMs)")
+        // Kept for the panel: what this phone's call log holds when no method can place it.
+        if (raw.isNotEmpty()) {
+            try {
+                context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE).edit()
+                    .putString(KEY_LAST_UNRESOLVED, JSONObject()
+                        .put("account", raw.take(40)).put("component", (componentName ?: "").take(120))
+                        .put("oem", oemIds.joinToString(",") { it ?: "" }).put("sims", subs.size).toString())
+                    .apply()
+            } catch (e: Throwable) { }
+        }
         return finish(context, null, "", "unknown", null, raw, learnIt = false)
     }
 
+    /* ── Phone accounts (used by 2b) ──────────────────────────────────────── */
+
+    /** Every phone account this call-log id can refer to: rebuilt from the row, and as telecom lists it. */
+    @SuppressLint("MissingPermission")
+    private fun handlesFor(context: Context, raw: String, componentName: String?): List<PhoneAccountHandle> {
+        val out = mutableListOf<PhoneAccountHandle>()
+        try {
+            val telecom = context.getSystemService(TelecomManager::class.java)
+            telecom?.callCapablePhoneAccounts?.forEach { if (it.id == raw) out += it }
+        } catch (e: Throwable) { }
+        if (out.isEmpty() && !componentName.isNullOrBlank()) {
+            try { ComponentName.unflattenFromString(componentName)?.let { out += PhoneAccountHandle(it, raw) } } catch (e: Throwable) { }
+        }
+        return out
+    }
+
+    /** Telephony's own account → subscription match; null where the phone will not say. */
+    private fun subIdViaTelephony(context: Context, handle: PhoneAccountHandle): Int? {
+        return try {
+            val tm = context.getSystemService(TelephonyManager::class.java) ?: return null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                return tm.getSubscriptionId(handle).takeIf { it != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+            }
+            val account = context.getSystemService(TelecomManager::class.java)?.getPhoneAccount(handle) ?: return null
+            val m = TelephonyManager::class.java.getMethod("getSubIdForPhoneAccount", PhoneAccount::class.java)
+            (m.invoke(tm, account) as? Int)?.takeIf { it != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+        } catch (e: Throwable) {
+            Log.w(TAG, "getSubIdForPhoneAccount unavailable: ${e.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /** The SIM whose name, colour or number matches this account's — only when exactly one does. */
+    @SuppressLint("MissingPermission")
+    private fun subViaAccountDetails(context: Context, handle: PhoneAccountHandle, subs: List<SubscriptionInfo>): SubscriptionInfo? {
+        val account = (try { context.getSystemService(TelecomManager::class.java)?.getPhoneAccount(handle) } catch (e: Throwable) { null })
+            ?: return null
+        fun norm(s: CharSequence?) = s?.toString()?.trim()?.lowercase() ?: ""
+
+        val label = norm(account.label)
+        if (label.isNotEmpty()) {
+            val m = subs.filter { norm(it.displayName) == label }
+            if (m.size == 1) return m[0]
+        }
+        val tint = try { account.highlightColor } catch (e: Throwable) { 0 }
+        if (tint != 0 && tint != PhoneAccount.NO_HIGHLIGHT_COLOR) {
+            val m = subs.filter { try { it.iconTint == tint } catch (e: Throwable) { false } }
+            if (m.size == 1) return m[0]
+        }
+        val digits = { s: String -> s.filter { it.isDigit() }.takeLast(10) }
+        val addr = try { digits(account.address?.schemeSpecificPart ?: "") } catch (e: Throwable) { "" }
+        if (addr.length >= 8) {
+            val m = subs.filter { digits(numberOf(it)) == addr }
+            if (m.size == 1) return m[0]
+        }
+        return null
+    }
+
     private fun finish(context: Context, slot: Int?, carrier: String, source: String, subId: Int?, accountId: String, learnIt: Boolean = true): Sim {
+        // How the last call-log row was placed — only for real rows, never the empty lookups live events make.
+        if (accountId.isNotEmpty()) {
+            try { context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LAST_SOURCE, source).apply() } catch (e: Throwable) { }
+        }
         if (learnIt && slot != null && accountId.isNotEmpty()) learn(context, accountId, slot)
         var label = ""
         if (slot != null) {
