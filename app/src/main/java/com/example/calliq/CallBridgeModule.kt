@@ -319,6 +319,27 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * What is installed: the note typed into BUILD_NOTE.txt when this APK was built, its version,
+     * and when this exact APK was installed on the phone — which no build cache can fake, so even
+     * with an unchanged note it proves the install is new.
+     */
+    @ReactMethod
+    fun getBuildInfo(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            promise.resolve(Arguments.createMap().apply {
+                putString("note", BuildConfig.BUILD_NOTE)
+                putString("versionName", pi.versionName ?: "")
+                putDouble("versionCode", DeviceCheckin.appBuild(ctx).toDouble())
+                putDouble("installedAt", pi.lastUpdateTime.toDouble())
+            })
+        } catch (e: Throwable) {
+            promise.reject("build_info_failed", e)
+        }
+    }
+
     /** "Keep CallIQ running": the foreground service that stops Android freezing the app between calls. */
     @ReactMethod
     fun setMonitorEnabled(on: Boolean, promise: Promise) {

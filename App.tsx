@@ -195,6 +195,9 @@ const App = (): React.JSX.Element => {
   const [wizardKey, setWizardKey] = useState<string | null>(null);
   const [wizardTotal, setWizardTotal] = useState<number>(0);
   const [askConfirm, setAskConfirm] = useState<SetupStep | null>(null);
+  // "Is this the latest build?" — the note from BUILD_NOTE.txt, shown each time the app opens.
+  const [buildInfo, setBuildInfo] = useState<{ note: string; versionName: string; versionCode: number; installedAt: number } | null>(null);
+  const [showBuildCard, setShowBuildCard] = useState<boolean>(false);
   const [connTest, setConnTest] = useState<{ busy: boolean; ok?: boolean; message?: string }>({ busy: false });
   // Read by the AppState listener, which must always see live values rather than a stale closure.
   const wizardRef = React.useRef<{ on: boolean; inFlight: string; attempted: Set<string> }>({ on: false, inFlight: '', attempted: new Set() });
@@ -431,6 +434,18 @@ const App = (): React.JSX.Element => {
     const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
     return () => sub.remove();
   }, [activeDispositionCall, askConfirm, isPopupSetupOpen, isSimModalOpen, isAdminModalOpen, searchQuery, selectedFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const info = await CallBridge?.getBuildInfo?.();
+        if (info) {
+          setBuildInfo(info);
+          if (String(info.note || '').trim()) setShowBuildCard(true);
+        }
+      } catch (_) {}
+    })();
+  }, []);
 
   // AppState Listener
   useEffect(() => {
@@ -1247,6 +1262,32 @@ const App = (): React.JSX.Element => {
         </View>
       </Modal>
 
+      {/* "This is the latest build" — whatever was in BUILD_NOTE.txt when this APK was built */}
+      <Modal visible={showBuildCard && !!buildInfo} transparent animationType="fade" onRequestClose={() => setShowBuildCard(false)}>
+        <Pressable style={styles.buildScrim} onPress={() => setShowBuildCard(false)}>
+          <Pressable style={styles.buildCard} onPress={() => {}}>
+            <Text style={styles.buildBadge}>✓ LATEST BUILD INSTALLED</Text>
+            <Text style={styles.buildNote}>{buildInfo?.note}</Text>
+            <View style={styles.buildMetaRow}>
+              <Text style={styles.buildMeta}>
+                v{buildInfo?.versionName} ({buildInfo?.versionCode})
+              </Text>
+              <Text style={styles.buildMeta}>
+                installed {buildInfo?.installedAt
+                  ? new Date(buildInfo.installedAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
+                  : '—'}
+              </Text>
+            </View>
+            <Pressable
+              style={({ pressed }: { pressed: boolean }) => [styles.buildOk, pressed && { opacity: 0.85 }]}
+              onPress={() => setShowBuildCard(false)}
+            >
+              <Text style={styles.buildOkText}>OK</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* Phone setup — everything this phone needs, and one tap to allow it all */}
       <Modal visible={isPopupSetupOpen} transparent animationType="slide" onRequestClose={closeSetup}>
         <View style={styles.modalOverlay}>
@@ -1729,6 +1770,26 @@ const App = (): React.JSX.Element => {
 };
 
 const styles = StyleSheet.create({
+  // Latest-build card
+  buildScrim: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.55)', justifyContent: 'center', padding: 24 },
+  buildCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 22,
+    borderTopWidth: 5,
+    borderTopColor: '#10B981',
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  buildBadge: { fontSize: 11, fontWeight: '800', color: '#047857', letterSpacing: 0.8 },
+  buildNote: { fontSize: 20, fontWeight: '800', color: '#0F172A', marginTop: 10, lineHeight: 27 },
+  buildMetaRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14, flexWrap: 'wrap', gap: 6 },
+  buildMeta: { fontSize: 12, color: '#64748B', fontWeight: '600' },
+  buildOk: { backgroundColor: '#10B981', borderRadius: 12, paddingVertical: 12, alignItems: 'center', marginTop: 18 },
+  buildOkText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
   // Phone setup
   allowAllBtn: {
     backgroundColor: '#4F46E5',
