@@ -142,6 +142,25 @@ object CallLogHelper {
     }
 
     /**
+     * When the newest call in the log started, or 0. Reads one column of one row, so the
+     * background catch-up can ask "anything new?" every few minutes for free — and only touch
+     * the network when the answer is yes. (No LIMIT in the sort order: Android 11+'s call-log
+     * provider rejects it; the cursor is read lazily, so taking the first row costs the same.)
+     */
+    fun newestCallAt(context: Context): Long = try {
+        context.contentResolver.query(
+            CallLog.Calls.CONTENT_URI, arrayOf(CallLog.Calls.DATE), null, null, "${CallLog.Calls.DATE} DESC"
+        )?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L } ?: 0L
+    } catch (e: Throwable) {
+        Log.w("CallLogHelper", "newestCallAt failed: ${e.message}")
+        0L
+    }
+
+    /** The newest call already handed to the uploader. */
+    fun lastQueuedAt(context: Context): Long =
+        context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE).getLong("LAST_QUEUED_CALL_TS", 0L)
+
+    /**
      * The call the popup is waiting for: the newest row at or after `sinceMs`, optionally for a
      * known number. Used to fill in a popup that opened before Android wrote the row.
      */

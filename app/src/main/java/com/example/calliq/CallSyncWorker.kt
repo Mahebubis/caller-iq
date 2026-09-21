@@ -73,7 +73,7 @@ class CallSyncWorker(
                 if (taggedVia.isNotEmpty()) put("tagged_via", taggedVia)
                 // So the panel can see which phones cannot show the post-call popup, instead of
                 // waiting for someone to notice they are never tagging anything.
-                put("popup_ok", CallIqConfig.popupEnabled(applicationContext) && CallPopupOverlay.canShow(applicationContext))
+                put("popup_ok", SetupState.popupReady(applicationContext))
             }
 
             val url = URL(targetUrl)
@@ -95,15 +95,33 @@ class CallSyncWorker(
             Log.d("CallSyncWorker", "HTTP Response Code: $responseCode for key: $idempotencyKey")
 
             if (responseCode in 200..299) {
+                noteSync(null)
                 Result.success()
             } else {
                 Log.w("CallSyncWorker", "Non-2xx HTTP status $responseCode, queueing for retry.")
+                noteSync("Server replied HTTP $responseCode")
                 Result.retry()
             }
         } catch (e: Exception) {
             Log.e("CallSyncWorker", "Network or server failure during call log sync: ${e.message}", e)
+            noteSync(when (e) {
+                is java.net.UnknownHostException -> "No internet, or the server name cannot be found"
+                is java.net.SocketTimeoutException -> "The server did not answer in time"
+                is javax.net.ssl.SSLException -> "Secure connection failed — check the phone's date and time"
+                else -> "${e.javaClass.simpleName}: ${e.message?.take(100) ?: ""}"
+            })
             Result.retry()
         }
+    }
+
+    /** null = it worked. Kept on the phone and shown in the app; the panel gets it on the next check-in. */
+    private fun noteSync(error: String?) {
+        try {
+            val ed = CallIqConfig.prefs(applicationContext).edit()
+            if (error == null) ed.putLong(DeviceCheckin.KEY_SYNC_OK_AT, System.currentTimeMillis()).remove(DeviceCheckin.KEY_SYNC_ERR)
+            else ed.putString(DeviceCheckin.KEY_SYNC_ERR, error.take(160)).putLong(DeviceCheckin.KEY_SYNC_ERR_AT, System.currentTimeMillis())
+            ed.apply()
+        } catch (e: Throwable) { }
     }
 
     companion object {

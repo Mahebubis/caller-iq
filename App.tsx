@@ -48,6 +48,44 @@ export interface PopupReadiness {
   lastNoteAt: number;
 }
 
+/** One switch this phone needs, read back from the system where Android allows — see SetupState.kt. */
+export interface SetupStep {
+  key: string;
+  title: string;
+  why: string;
+  how: string;
+  status: 'done' | 'todo' | 'confirmed' | 'unknown';
+  required: boolean;
+  kind: 'dialog' | 'screen' | 'manual';
+  ok: boolean;
+}
+export interface SetupInfo {
+  steps: SetupStep[];
+  requiredLeft: number;
+  optionalLeft: number;
+  popupReady: boolean;
+  manufacturer: string;
+  model: string;
+  android: string;
+  sdk: number;
+  appVersion: string;
+  syncOkAt: number;
+  syncError: string;
+  syncErrorAt: number;
+  bgRunAt: number;
+  checkinAt: number;
+  checkinError: string;
+}
+
+const agoText = (ms: number): string => {
+  if (!ms) return 'never';
+  const sec = Math.max(0, (Date.now() - ms) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} h ago`;
+  return `${Math.floor(sec / 86400)} days ago`;
+};
+
 /** Automatic SIM balance checks: the carrier's own code, run per SIM. */
 export interface UssdSim {
   slot: number;
@@ -106,6 +144,14 @@ const DISPOSITION_OPTIONS = [
 
 
 
+/** One line of "Is it working?" — label left, the phone's own evidence right. */
+const HealthRow = ({ label, value, bad }: { label: string; value: string; bad?: boolean }) => (
+  <View style={styles.healthRow}>
+    <Text style={styles.healthLabel}>{label}</Text>
+    <Text style={[styles.healthValue, bad && { color: '#B91C1C' }]} numberOfLines={3}>{value}</Text>
+  </View>
+);
+
 const App = (): React.JSX.Element => {
   // Duty & Profile State
   const [permissionsGranted, setPermissionsGranted] = useState<boolean>(true);
@@ -137,6 +183,16 @@ const App = (): React.JSX.Element => {
   const [simDiag, setSimDiag] = useState<SimDiagnostics>({});
   const [ussd, setUssd] = useState<UssdSettings | null>(null);
   const [checkingSlot, setCheckingSlot] = useState<number | null>(null);
+
+  // One-tap setup ("Allow all permissions")
+  const [setup, setSetup] = useState<SetupInfo | null>(null);
+  const [wizardOn, setWizardOn] = useState<boolean>(false);
+  const [wizardKey, setWizardKey] = useState<string | null>(null);
+  const [wizardTotal, setWizardTotal] = useState<number>(0);
+  const [askConfirm, setAskConfirm] = useState<SetupStep | null>(null);
+  const [connTest, setConnTest] = useState<{ busy: boolean; ok?: boolean; message?: string }>({ busy: false });
+  // Read by the AppState listener, which must always see live values rather than a stale closure.
+  const wizardRef = React.useRef<{ on: boolean; inFlight: string; attempted: Set<string> }>({ on: false, inFlight: '', attempted: new Set() });
 
   // Admin Config
   const [syncEndpoint, setSyncEndpoint] = useState<string>('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/log_call.php');
@@ -276,6 +332,13 @@ const App = (): React.JSX.Element => {
         } catch (_) {}
       }
 
+      if (CallBridge?.getSetupState) {
+        try {
+          const st = await withTimeout<any>(CallBridge.getSetupState().catch(() => null), 2000, null);
+          if (st) setSetup(st);
+        } catch (_) {}
+      }
+
       if (CallBridge?.getUssdSettings) {
         try {
           setUssd(await withTimeout<any>(CallBridge.getUssdSettings().catch(() => null), 1500, null));
@@ -334,15 +397,14 @@ const App = (): React.JSX.Element => {
      to go unnoticed: the setup sheet opens itself once per launch until it is sorted. */
   const setupPrompted = React.useRef(false);
   useEffect(() => {
-    if (!readiness || setupPrompted.current) return;
-    if (!readiness.overlay || !readiness.callLog) {
-      setupPrompted.current = true;
+    if (!setup || setupPrompted.current) return;
+    setupPrompted.current = true;
+    if (setup.steps.some((x) => x.required && x.status === 'todo')) {
       const t = setTimeout(() => setIsPopupSetupOpen(true), 600);
       return () => clearTimeout(t);
     }
-    setupPrompted.current = true;
     return undefined;
-  }, [readiness]);
+  }, [setup]);
 
   /*
    * Android's back button should close what is open — a sheet, a dialog — and only leave the app
@@ -351,7 +413,8 @@ const App = (): React.JSX.Element => {
   useEffect(() => {
     const onBack = () => {
       if (activeDispositionCall) { setActiveDispositionCall(null); return true; }
-      if (isPopupSetupOpen) { setIsPopupSetupOpen(false); return true; }
+      if (askConfirm) { setAskConfirm(null); return true; }
+      if (isPopupSetupOpen) { closeSetup(); return true; }
       if (isSimModalOpen) { setIsSimModalOpen(false); return true; }
       if (isAdminModalOpen) { setIsAdminModalOpen(false); return true; }
       if (searchQuery) { setSearchQuery(''); return true; }
@@ -360,7 +423,7 @@ const App = (): React.JSX.Element => {
     };
     const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
     return () => sub.remove();
-  }, [activeDispositionCall, isPopupSetupOpen, isSimModalOpen, isAdminModalOpen, searchQuery, selectedFilter]);
+  }, [activeDispositionCall, askConfirm, isPopupSetupOpen, isSimModalOpen, isAdminModalOpen, searchQuery, selectedFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // AppState Listener
   useEffect(() => {
@@ -441,6 +504,170 @@ const App = (): React.JSX.Element => {
       addLog(`OEM settings error: ${err.message || err}`);
     }
   };
+
+  /* ── "Allow all permissions" ────────────────────────────────────────────
+     Walks through only what is still off on THIS phone, in order. Each step either answers in a
+     dialog over the app (permissions, battery) or opens the exact settings screen. When the
+     counselor comes back — and on most phones the app brings itself back the moment the switch is
+     on — it re-reads the phone and moves straight to the next step. A switch the phone cannot
+     read back is confirmed by the counselor, never assumed. */
+
+  const loadSetup = async (): Promise<SetupInfo | null> => {
+    if (!CallBridge?.getSetupState) return null;
+    try {
+      const st = await withTimeout<SetupInfo | null>(CallBridge.getSetupState().catch(() => null), 2000, null);
+      if (st) setSetup(st);
+      return st;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  /** Required first, then recommended; never one already tried in this run, so it cannot loop. */
+  const nextStep = (st: SetupInfo | null): SetupStep | undefined => {
+    if (!st) return undefined;
+    const tried = wizardRef.current.attempted;
+    return st.steps.find((x) => !x.ok && x.required && !tried.has(x.key))
+      || st.steps.find((x) => !x.ok && !x.required && !tried.has(x.key));
+  };
+
+  const finishWizard = (st: SetupInfo | null) => {
+    wizardRef.current.on = false;
+    wizardRef.current.inFlight = '';
+    setWizardOn(false);
+    setWizardKey(null);
+    const left = st ? st.steps.filter((x) => x.required && !x.ok) : [];
+    addLog(left.length ? `Setup paused — still off: ${left.map((x) => x.title).join(', ')}.` : 'Setup complete — every required switch is on.');
+  };
+
+  const goNext = (st: SetupInfo | null) => {
+    if (!wizardRef.current.on) return;
+    const next = nextStep(st);
+    if (!next) { finishWizard(st); return; }
+    // A beat to let the checklist show the tick before the next screen opens.
+    setTimeout(() => { if (wizardRef.current.on) runStep(next); }, 450);
+  };
+
+  /** The counselor is back from a step (or skipped it). */
+  const onStepDone = async (key: string, opts: { noAsk?: boolean } = {}) => {
+    wizardRef.current.inFlight = '';
+    const st = await loadSetup();
+    const step = st?.steps.find((x) => x.key === key);
+    // The phone cannot read this switch, so ask — once — rather than guess.
+    if (!opts.noAsk && step && step.kind === 'manual' && !step.ok) {
+      setAskConfirm(step);
+      return;
+    }
+    goNext(st);
+  };
+
+  const runStep = async (step: SetupStep) => {
+    const w = wizardRef.current;
+    w.attempted.add(step.key);
+    w.inFlight = step.key;
+    setWizardKey(step.key);
+    try {
+      if (step.key === 'phone') {
+        const res = await withTimeout<any>(CallBridge?.requestCorePermissions?.() ?? Promise.resolve(null), 90000, null);
+        w.inFlight = '';
+        if (res && !res.granted && Array.isArray(res.blocked) && res.blocked.length) {
+          // Refused with "Don't ask again": Android will never show that dialog again, so the
+          // only place left to allow it is App info.
+          Alert.alert(
+            'Allow it in App info',
+            'Android will not ask again. On the next screen open Permissions, and allow Call logs and Phone. Then press Back.',
+            [
+              { text: 'Skip', style: 'cancel', onPress: () => { onStepDone('phone', { noAsk: true }); } },
+              { text: 'Open App info', onPress: async () => { w.inFlight = 'phone_details'; await CallBridge?.openSetupStep?.('app_details'); } },
+            ],
+          );
+          return;
+        }
+        await onStepDone('phone');
+        return;
+      }
+      const opened = await CallBridge?.openSetupStep?.(step.key);
+      if (!opened) {
+        w.inFlight = '';
+        Alert.alert('Open it in Settings', `${step.title}: ${step.how}`, [{ text: 'OK', onPress: () => { onStepDone(step.key); } }]);
+      }
+      // Otherwise wait: the AppState listener below picks up the return.
+    } catch (err: any) {
+      w.inFlight = '';
+      addLog(`Setup step ${step.key} failed: ${err?.message || err}`);
+      await onStepDone(step.key, { noAsk: true });
+    }
+  };
+
+  const startWizard = async () => {
+    setIsPopupSetupOpen(true);
+    wizardRef.current = { on: true, inFlight: '', attempted: new Set() };
+    const st = (await loadSetup()) || setup;
+    const first = nextStep(st);
+    if (!first) {
+      wizardRef.current.on = false;
+      Alert.alert('All set', 'Everything this phone needs is already on.');
+      return;
+    }
+    setWizardTotal(st ? st.steps.filter((x) => !x.ok).length : 0);
+    setWizardOn(true);
+    runStep(first);
+  };
+
+  /** One step on its own, from its row in the checklist. */
+  const runSingle = (step: SetupStep) => {
+    wizardRef.current = { on: false, inFlight: '', attempted: new Set() };
+    runStep(step);
+  };
+
+  const answerConfirm = async (yes: boolean) => {
+    const step = askConfirm;
+    setAskConfirm(null);
+    if (!step) return;
+    if (yes) {
+      await CallBridge?.confirmSetupStep?.(step.key, true);
+      addLog(`Confirmed: ${step.title} is on.`);
+    }
+    goNext(await loadSetup());
+  };
+
+  const confirmDirect = async (step: SetupStep) => {
+    await CallBridge?.confirmSetupStep?.(step.key, true);
+    addLog(`Confirmed: ${step.title} is on.`);
+    loadSetup();
+  };
+
+  const closeSetup = () => {
+    if (wizardRef.current.on) finishWizard(setup);
+    setAskConfirm(null);
+    setIsPopupSetupOpen(false);
+  };
+
+  const handleTestConnection = async () => {
+    setConnTest({ busy: true });
+    try {
+      const r = await withTimeout<any>(CallBridge?.testConnection?.() ?? Promise.resolve(null), 25000, null);
+      setConnTest({ busy: false, ok: !!r?.ok, message: r?.message || 'No answer — check the internet connection.' });
+      loadSetup();
+    } catch (err: any) {
+      setConnTest({ busy: false, ok: false, message: err?.message || 'Test failed.' });
+    }
+  };
+
+  // The live handler for the AppState listener (which is registered once).
+  const stepReturnRef = React.useRef<(key: string) => void>(() => {});
+  stepReturnRef.current = (key: string) => { onStepDone(key); };
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return;
+      const k = wizardRef.current.inFlight;
+      // The permission dialog answers through its own promise, not through a return.
+      if (!k || k === 'phone') return;
+      stepReturnRef.current(k === 'phone_details' ? 'phone' : k);
+    });
+    return () => sub.remove();
+  }, []);
 
   // Runs the very same path a real hang-up takes, so a pass here means real calls will pop up too.
   const handleSimulateCallEnd = async () => {
@@ -663,72 +890,6 @@ const App = (): React.JSX.Element => {
     return list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [callLogs, selectedFilter, searchQuery]);
 
-  /* What still stands between a hung-up call and the popup. "Display over other apps" is the only
-     hard requirement; the rest decide whether it keeps working once the app is out of sight. */
-  const readinessSteps = useMemo(() => {
-    if (!readiness) return [];
-    return [
-      {
-        key: 'callLog',
-        ok: readiness.callLog,
-        title: 'Call log & Phone permission',
-        desc: 'Lets the app see that a call happened, and which SIM it used.',
-        action: handleRequestPermissions,
-        cta: 'Allow',
-        required: true,
-      },
-      {
-        key: 'overlay',
-        ok: readiness.overlay,
-        title: 'Display over other apps',
-        desc: 'Android blocks every popup over the dialer without this. This is the one that matters.',
-        action: handleEnableOverlay,
-        cta: 'Allow',
-        required: true,
-      },
-      ...(readiness.needsOemSteps ? [{
-        key: 'oemPopup',
-        ok: null as boolean | null,
-        title: `${readiness.manufacturer}: background pop-ups`,
-        desc: readiness.oemSteps,
-        action: () => openOem('popup'),
-        cta: 'Open',
-        required: true,
-      }, {
-        key: 'oemAutostart',
-        ok: null as boolean | null,
-        title: `${readiness.manufacturer}: autostart`,
-        desc: 'Without autostart this phone stops waking the app once it is swiped away, so no call is noticed at all.',
-        action: () => openOem('autostart'),
-        cta: 'Open',
-        required: true,
-      }] : []),
-      {
-        key: 'battery',
-        ok: readiness.battery,
-        title: 'Unrestricted battery',
-        desc: 'Stops Android pausing the app between calls.',
-        action: handleRequestBatteryExemption,
-        cta: 'Fix',
-        required: false,
-      },
-      {
-        key: 'notifications',
-        ok: readiness.notifications,
-        title: 'Notifications',
-        desc: 'The fallback prompt when the popup itself cannot be drawn.',
-        action: () => openOem('notifications'),
-        cta: 'Allow',
-        required: false,
-      },
-    ];
-  }, [readiness]);
-
-  // Steps the phone can actually verify. The OEM ones cannot be read back, so they are never
-  // counted as done — they are shown as "check once".
-  const missingSteps = readinessSteps.filter((s) => s.ok === false).length;
-  const popupReady = !!readiness && readiness.overlay && readiness.callLog && !readiness.needsOemSteps;
-
   // Call Type Details
   const getCallTypeDetails = (type: string) => {
     switch (type ? type.toUpperCase() : '') {
@@ -797,63 +958,49 @@ const App = (): React.JSX.Element => {
         contentContainerStyle={styles.scrollBody}
         keyboardShouldPersistTaps="always"
       >
-        {/* The popup cannot appear until Android (and, on some makes, the phone's own security
-            app) allows it. Rather than failing silently, say exactly what is still missing. */}
-        {popupEnabled && readiness && !popupReady && (
-          <View style={styles.popupWarningCard}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.popupWarningTitle}>
-                📋 Post-call popup is not ready{missingSteps > 0 ? ` — ${missingSteps} step${missingSteps === 1 ? '' : 's'} left` : ''}
-              </Text>
-              <Text style={styles.popupWarningDesc}>
-                {!readiness.overlay
-                  ? 'Android needs “Display over other apps” before anything can show over the dialer.'
-                  : readiness.needsOemSteps
-                    ? `${readiness.manufacturer} also has its own pop-up and autostart switches.`
-                    : 'One or two settings still need allowing.'}
-              </Text>
+        {/* Everything this phone still needs, from one list that knows this Android version and
+            this maker — replaces the separate popup / battery / permission warnings. */}
+        {setup && setup.steps.some((x) => x.required && !x.ok) && (() => {
+          const off = setup.steps.filter((x) => x.required && x.status === 'todo');
+          const unsure = setup.steps.filter((x) => x.required && x.status === 'unknown');
+          return (
+            <View style={styles.popupWarningCard}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.popupWarningTitle}>
+                  {off.length
+                    ? `⚠️ ${off.length} setting${off.length === 1 ? '' : 's'} still off`
+                    : `☑️ ${unsure.length} to confirm`}
+                </Text>
+                <Text style={styles.popupWarningDesc}>
+                  {off.length
+                    ? `${off.map((x) => x.title).join(', ')}. Until ${off.length === 1 ? 'it is' : 'they are'} on, calls can be missed and the popup may not appear.`
+                    : `${unsure.map((x) => x.title).join(', ')} — this phone cannot report ${unsure.length === 1 ? 'it' : 'them'}, so confirm once.`}
+                </Text>
+              </View>
+              <Pressable
+                style={({ pressed }: { pressed: boolean }) => [styles.popupFixBtn, pressed && { opacity: 0.7 }]}
+                onPress={startWizard}
+              >
+                <Text style={styles.popupFixBtnText}>Allow all</Text>
+              </Pressable>
             </View>
-            <Pressable
-              style={({ pressed }: { pressed: boolean }) => [styles.popupFixBtn, pressed && { opacity: 0.7 }]}
-              onPress={() => setIsPopupSetupOpen(true)}
-            >
-              <Text style={styles.popupFixBtnText}>Fix now</Text>
-            </Pressable>
-          </View>
-        )}
+          );
+        })()}
 
-        {/* OEM Battery Saver Warning Card */}
-        {!batteryOptIgnored && (
-          <View style={styles.batteryWarningCard}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.batteryWarningTitle}>⚠️ Unrestricted Battery Required</Text>
-              <Text style={styles.batteryWarningDesc}>
-                OEM battery optimization may suspend background receivers when idle.
-              </Text>
-            </View>
-            <Pressable
-              style={({ pressed }) => [styles.batteryFixBtn, pressed && { opacity: 0.7 }]}
-              onPress={handleRequestBatteryExemption}
-            >
-              <Text style={styles.batteryFixBtnText}>Fix Now</Text>
-            </Pressable>
-          </View>
-        )}
-
-        {/* Missing Permissions Banner */}
-        {!permissionsGranted && (
+        {/* Calls that cannot reach the panel must not fail silently. */}
+        {!!setup?.syncError && (
           <View style={styles.permCard}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.permTitle}>Permissions Missing</Text>
+              <Text style={styles.permTitle}>Calls are not uploading</Text>
               <Text style={styles.permDesc}>
-                READ_CALL_LOG &amp; READ_PHONE_STATE permissions required to read device call logs.
+                {setup.syncError}{pendingQueueCount > 0 ? ` — ${pendingQueueCount} waiting on this phone` : ''}. They upload by themselves once this is fixed.
               </Text>
             </View>
             <Pressable
-              style={({ pressed }) => [styles.permBtn, pressed && { opacity: 0.7 }]}
-              onPress={handleRequestPermissions}
+              style={({ pressed }: { pressed: boolean }) => [styles.permBtn, pressed && { opacity: 0.7 }]}
+              onPress={() => { setIsPopupSetupOpen(true); handleTestConnection(); }}
             >
-              <Text style={styles.permBtnText}>Enable</Text>
+              <Text style={styles.permBtnText}>Test</Text>
             </Pressable>
           </View>
         )}
@@ -1035,7 +1182,7 @@ const App = (): React.JSX.Element => {
       </ScrollView>
 
       {/* Post-Call Disposition Modal */}
-      <Modal visible={activeDispositionCall !== null} transparent animationType="slide">
+      <Modal visible={activeDispositionCall !== null} transparent animationType="slide" onRequestClose={() => setActiveDispositionCall(null)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
@@ -1074,58 +1221,178 @@ const App = (): React.JSX.Element => {
         </View>
       </Modal>
 
-      {/* Post-Call Popup Setup */}
-      <Modal visible={isPopupSetupOpen} transparent animationType="slide">
+      {/* Phone setup — everything this phone needs, and one tap to allow it all */}
+      <Modal visible={isPopupSetupOpen} transparent animationType="slide" onRequestClose={closeSetup}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>Post-Call Popup Setup</Text>
+                <Text style={styles.modalTitle}>Phone setup</Text>
                 <Text style={styles.modalSub}>
-                  Android only lets an app show a card over the dialer once these are allowed.
+                  {setup
+                    ? `${setup.model} · Android ${setup.android} — only what this phone needs.`
+                    : 'Checking this phone…'}
                 </Text>
               </View>
-              <Pressable onPress={() => setIsPopupSetupOpen(false)}>
+              <Pressable onPress={closeSetup} hitSlop={12}>
                 <Text style={styles.closeModalText}>✕</Text>
               </Pressable>
             </View>
 
-            <ScrollView style={{ maxHeight: 460 }}>
-              {readinessSteps.map((step, idx) => (
-                <View key={step.key} style={styles.stepRow}>
+            <ScrollView style={{ maxHeight: 540 }} keyboardShouldPersistTaps="handled">
+              {/* The one button */}
+              {setup && setup.steps.some((x) => !x.ok) && !wizardOn && !askConfirm && (
+                <Pressable
+                  style={({ pressed }: { pressed: boolean }) => [styles.allowAllBtn, pressed && { opacity: 0.85, transform: [{ scale: 0.99 }] }]}
+                  onPress={startWizard}
+                >
+                  <Text style={styles.allowAllText}>Allow all permissions</Text>
+                  <Text style={styles.allowAllSub}>
+                    {setup.steps.filter((x) => !x.ok).length} step{setup.steps.filter((x) => !x.ok).length === 1 ? '' : 's'} · the app moves to the next one by itself
+                  </Text>
+                </Pressable>
+              )}
+              {setup && setup.steps.every((x) => x.ok) && (
+                <View style={styles.allSetCard}>
+                  <Text style={styles.allSetTitle}>✓ Everything is on</Text>
+                  <Text style={styles.allSetSub}>Calls upload by themselves, and the popup appears after every call.</Text>
+                </View>
+              )}
+
+              {/* The step in progress */}
+              {wizardOn && !askConfirm && (() => {
+                const cur = setup?.steps.find((x) => x.key === wizardKey);
+                if (!cur) return null;
+                return (
+                  <View style={styles.wizardCard}>
+                    <Text style={styles.wizardStepNo}>
+                      STEP {Math.min(wizardRef.current.attempted.size, Math.max(wizardTotal, 1))} OF {Math.max(wizardTotal, 1)}
+                    </Text>
+                    <Text style={styles.wizardTitle}>{cur.title}</Text>
+                    <Text style={styles.wizardHow}>{cur.how}</Text>
+                    <Text style={styles.settingDesc}>
+                      {cur.kind === 'dialog'
+                        ? 'Answer on the screen that just opened.'
+                        : cur.kind === 'screen'
+                          ? 'Flip the switch — CallIQ comes back by itself. If it does not, press Back.'
+                          : 'This phone does not tell apps when this is on. Flip it, then press Back.'}
+                    </Text>
+                    <View style={styles.wizardBtnRow}>
+                      <Pressable style={styles.stepBtn} onPress={() => runStep(cur)}>
+                        <Text style={styles.stepBtnText}>Open again</Text>
+                      </Pressable>
+                      <Pressable style={styles.ghostBtn} onPress={() => onStepDone(cur.key, { noAsk: true })}>
+                        <Text style={styles.ghostBtnText}>Skip</Text>
+                      </Pressable>
+                      <Pressable style={styles.ghostBtn} onPress={() => finishWizard(setup)}>
+                        <Text style={styles.ghostBtnText}>Stop</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                );
+              })()}
+
+              {/* A switch the phone cannot read back */}
+              {askConfirm && (
+                <View style={[styles.wizardCard, styles.wizardCardAsk]}>
+                  <Text style={styles.wizardTitle}>Is “{askConfirm.title}” on now?</Text>
+                  <Text style={styles.wizardHow}>{askConfirm.how}</Text>
+                  <Text style={styles.settingDesc}>
+                    {setup?.manufacturer || 'This'} phones do not let apps read this switch, so the app takes your word for it — the panel shows it as confirmed.
+                  </Text>
+                  <View style={styles.wizardBtnRow}>
+                    <Pressable style={styles.stepBtn} onPress={() => answerConfirm(true)}>
+                      <Text style={styles.stepBtnText}>Yes, it's on</Text>
+                    </Pressable>
+                    <Pressable style={styles.ghostBtn} onPress={() => { const st = askConfirm; setAskConfirm(null); runStep(st); }}>
+                      <Text style={styles.ghostBtnText}>Open again</Text>
+                    </Pressable>
+                    <Pressable style={styles.ghostBtn} onPress={() => answerConfirm(false)}>
+                      <Text style={styles.ghostBtnText}>Not yet</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
+
+              {/* The checklist */}
+              {!setup && <ActivityIndicator style={{ marginVertical: 24 }} color="#4F46E5" />}
+              {(setup?.steps || []).map((step) => (
+                <View key={step.key} style={[styles.stepRow, wizardOn && wizardKey === step.key && styles.stepRowActive]}>
                   <View style={[
                     styles.stepBadge,
-                    step.ok === true && styles.stepBadgeOk,
-                    step.ok === false && styles.stepBadgeMissing,
+                    step.ok && styles.stepBadgeOk,
+                    step.status === 'todo' && styles.stepBadgeMissing,
+                    step.status === 'unknown' && styles.stepBadgeUnknown,
                   ]}>
                     <Text style={[
                       styles.stepBadgeText,
-                      step.ok === true && { color: '#047857' },
-                      step.ok === false && { color: '#B91C1C' },
+                      step.ok && { color: '#047857' },
+                      step.status === 'todo' && { color: '#B91C1C' },
+                      step.status === 'unknown' && { color: '#B45309' },
                     ]}>
-                      {step.ok === true ? '✓' : step.ok === false ? '!' : idx + 1}
+                      {step.ok ? '✓' : step.status === 'todo' ? '!' : '?'}
                     </Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.settingTitle}>
                       {step.title}
                       {!step.required && <Text style={styles.settingDesc}>  · recommended</Text>}
+                      {step.status === 'confirmed' && <Text style={styles.settingDesc}>  · you confirmed</Text>}
+                      {step.status === 'unknown' && <Text style={styles.settingDesc}>  · not confirmed</Text>}
                     </Text>
-                    <Text style={styles.settingDesc}>{step.desc}</Text>
+                    <Text style={styles.settingDesc}>{step.ok ? step.why : `${step.why} ${step.how}`}</Text>
                   </View>
-                  {step.ok !== true && (
-                    <Pressable
-                      style={({ pressed }: { pressed: boolean }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
-                      onPress={step.action}
-                    >
-                      <Text style={styles.stepBtnText}>{step.cta}</Text>
-                    </Pressable>
+                  {!step.ok && !wizardOn && !askConfirm && (
+                    <View style={{ gap: 6, alignItems: 'stretch' }}>
+                      <Pressable style={({ pressed }: { pressed: boolean }) => [styles.stepBtn, pressed && { opacity: 0.7 }]} onPress={() => runSingle(step)}>
+                        <Text style={styles.stepBtnText}>{step.kind === 'dialog' ? 'Allow' : 'Open'}</Text>
+                      </Pressable>
+                      {step.status === 'unknown' && (
+                        <Pressable style={({ pressed }: { pressed: boolean }) => [styles.ghostBtn, pressed && { opacity: 0.7 }]} onPress={() => confirmDirect(step)}>
+                          <Text style={styles.ghostBtnText}>It's on</Text>
+                        </Pressable>
+                      )}
+                    </View>
                   )}
                 </View>
               ))}
 
+              {/* Proof, not promises */}
+              {setup && (
+                <View style={styles.healthBox}>
+                  <Text style={styles.noteBoxTitle}>Is it working?</Text>
+                  <HealthRow
+                    label="Calls last uploaded"
+                    value={setup.syncError ? `Failing — ${setup.syncError}` : agoText(setup.syncOkAt)}
+                    bad={!!setup.syncError}
+                  />
+                  <HealthRow
+                    label="Ran by itself in the background"
+                    value={setup.bgRunAt ? agoText(setup.bgRunAt) : 'not yet — check again in 15 min'}
+                    bad={!!setup.bgRunAt && Date.now() - setup.bgRunAt > 6 * 3600 * 1000}
+                  />
+                  <HealthRow
+                    label="Setup reported to the panel"
+                    value={setup.checkinError ? `Failing — ${setup.checkinError}` : agoText(setup.checkinAt)}
+                    bad={!!setup.checkinError}
+                  />
+                  <Pressable
+                    style={({ pressed }: { pressed: boolean }) => [styles.stepBtn, { alignSelf: 'flex-start', marginTop: 10 }, (pressed || connTest.busy) && { opacity: 0.7 }]}
+                    onPress={handleTestConnection}
+                    disabled={connTest.busy}
+                  >
+                    <Text style={styles.stepBtnText}>{connTest.busy ? 'Testing…' : 'Test connection'}</Text>
+                  </Pressable>
+                  {!!connTest.message && (
+                    <Text style={[styles.settingDesc, { marginTop: 6, color: connTest.ok ? '#047857' : '#B91C1C' }]}>
+                      {connTest.message}
+                    </Text>
+                  )}
+                </View>
+              )}
+
               <Pressable style={styles.modalSaveBtn} onPress={handleSimulateCallEnd}>
-                <Text style={styles.modalSaveText}>▶ Test it now</Text>
+                <Text style={styles.modalSaveText}>▶ Test the popup now</Text>
               </Pressable>
               <Text style={styles.settingDesc}>
                 This runs exactly what a real hang-up runs. If the card appears here, it appears after calls.
@@ -1138,7 +1405,7 @@ const App = (): React.JSX.Element => {
                 </View>
               )}
 
-              <Pressable style={styles.modalCancelBtn} onPress={() => { setIsPopupSetupOpen(false); fetchSystemData(); }}>
+              <Pressable style={styles.modalCancelBtn} onPress={() => { closeSetup(); fetchSystemData(); }}>
                 <Text style={styles.modalCancelText}>Done</Text>
               </Pressable>
             </ScrollView>
@@ -1147,7 +1414,7 @@ const App = (): React.JSX.Element => {
       </Modal>
 
       {/* Configure SIM Nicknames Modal */}
-      <Modal visible={isSimModalOpen} transparent animationType="fade">
+      <Modal visible={isSimModalOpen} transparent animationType="fade" onRequestClose={() => setIsSimModalOpen(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Configure Friendly SIM Labels</Text>
@@ -1190,7 +1457,7 @@ const App = (): React.JSX.Element => {
       </Modal>
 
       {/* Admin Lock & Settings Modal */}
-      <Modal visible={isAdminModalOpen} transparent animationType="slide">
+      <Modal visible={isAdminModalOpen} transparent animationType="slide" onRequestClose={() => setIsAdminModalOpen(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
@@ -1412,6 +1679,55 @@ const App = (): React.JSX.Element => {
 };
 
 const styles = StyleSheet.create({
+  // Phone setup
+  allowAllBtn: {
+    backgroundColor: '#4F46E5',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginBottom: 14,
+    alignItems: 'center',
+    elevation: 3,
+    shadowColor: '#4F46E5',
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+  },
+  allowAllText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  allowAllSub: { color: '#E0E7FF', fontSize: 11.5, marginTop: 3 },
+  allSetCard: { backgroundColor: '#ECFDF5', borderRadius: 12, padding: 14, marginBottom: 14 },
+  allSetTitle: { color: '#047857', fontSize: 15, fontWeight: '800' },
+  allSetSub: { color: '#065F46', fontSize: 12, marginTop: 3 },
+  wizardCard: {
+    backgroundColor: '#EEF2FF',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  wizardCardAsk: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
+  wizardStepNo: { fontSize: 10.5, fontWeight: '800', color: '#6366F1', letterSpacing: 0.6 },
+  wizardTitle: { fontSize: 16, fontWeight: '800', color: '#0F172A', marginTop: 4 },
+  wizardHow: { fontSize: 13, color: '#1E293B', marginTop: 6, marginBottom: 6, lineHeight: 19 },
+  wizardBtnRow: { flexDirection: 'row', gap: 8, marginTop: 12, flexWrap: 'wrap' },
+  ghostBtn: {
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  ghostBtnText: { color: '#334155', fontWeight: '700', fontSize: 11 },
+  stepRowActive: { backgroundColor: '#EEF2FF', borderRadius: 10 },
+  stepBadgeUnknown: { backgroundColor: '#FFFBEB' },
+  healthBox: { backgroundColor: '#F8FAFC', borderRadius: 12, padding: 12, marginTop: 10, marginBottom: 14, borderWidth: 1, borderColor: '#E2E8F0' },
+  healthRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10, paddingVertical: 5 },
+  healthLabel: { fontSize: 12, color: '#64748B', flexShrink: 0 },
+  healthValue: { fontSize: 12, color: '#0F172A', fontWeight: '700', flex: 1, textAlign: 'right' },
+
   container: {
     flex: 1,
     backgroundColor: '#F8FAFC',

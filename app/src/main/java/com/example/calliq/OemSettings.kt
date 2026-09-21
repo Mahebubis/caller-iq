@@ -1,5 +1,6 @@
 package com.example.calliq
 
+import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -23,20 +24,31 @@ object OemSettings {
 
     private const val TAG = "OemSettings"
 
-    private fun tryStart(context: Context, intents: List<Intent>): Boolean {
+    /*
+     * Each intent is simply tried, and the first that opens wins.
+     *
+     * This used to ask resolveActivity() first — but from Android 11 package-visibility rules
+     * make that return null for another maker's app (MIUI's Security app, ColorOS's safe centre)
+     * unless it is declared, so on every newer phone the right screen was silently skipped for
+     * the generic one. Starting it and catching the failure is the reliable test.
+     *
+     * From an Activity the screen opens in the app's own task, so Back returns straight here;
+     * only a bare Context needs a new task.
+     */
+    fun start(context: Context, intents: List<Intent>): Boolean {
         for (intent in intents) {
             try {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (intent.resolveActivity(context.packageManager) != null) {
-                    context.startActivity(intent)
-                    return true
-                }
+                if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                return true
             } catch (e: Throwable) {
                 Log.w(TAG, "intent failed: ${e.message}")
             }
         }
         return false
     }
+
+    private fun tryStart(context: Context, intents: List<Intent>): Boolean = start(context, intents)
 
     private fun component(pkg: String, cls: String) = Intent().setComponent(ComponentName(pkg, cls))
 
@@ -94,6 +106,11 @@ object OemSettings {
         if (m.contains("xiaomi") || m.contains("redmi") || m.contains("poco")) {
             intents += component("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
         }
+        if (m.contains("oneplus")) {
+            // Older OxygenOS. Newer OnePlus builds are ColorOS underneath and fall through to the
+            // ColorOS screens, then to App info → Battery usage → "Allow auto launch".
+            intents += component("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity")
+        }
         if (m.contains("oppo") || m.contains("realme") || m.contains("oneplus")) {
             intents += component("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")
             intents += component("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity")
@@ -105,6 +122,7 @@ object OemSettings {
         }
         if (m.contains("honor") || m.contains("huawei")) {
             intents += component("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")
+            intents += component("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")
         }
         if (m.contains("samsung")) {
             intents += component("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity")

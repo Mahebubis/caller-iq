@@ -212,6 +212,122 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /* ── One-tap setup ────────────────────────────────────────────────────── */
+
+    /**
+     * Every step for THIS phone (Android version and maker), each read back from the system, plus
+     * the phone's own evidence that it works: when calls last uploaded, and when CallIQ last ran
+     * by itself in the background.
+     */
+    @ReactMethod
+    fun getSetupState(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            val p = CallIqConfig.prefs(ctx)
+            val steps = SetupState.steps(ctx)
+            val arr = Arguments.createArray()
+            steps.forEach { s ->
+                arr.pushMap(Arguments.createMap().apply {
+                    putString("key", s.key); putString("title", s.title); putString("why", s.why)
+                    putString("how", s.how); putString("status", s.status)
+                    putBoolean("required", s.required); putString("kind", s.kind); putBoolean("ok", s.ok)
+                })
+            }
+            promise.resolve(Arguments.createMap().apply {
+                putArray("steps", arr)
+                putInt("requiredLeft", steps.count { it.required && !it.ok })
+                putInt("optionalLeft", steps.count { !it.required && !it.ok })
+                putBoolean("popupReady", SetupState.popupReady(ctx))
+                putString("manufacturer", Build.MANUFACTURER ?: "")
+                putString("model", CallIqConfig.deviceModel())
+                putString("android", Build.VERSION.RELEASE ?: "")
+                putInt("sdk", Build.VERSION.SDK_INT)
+                putString("appVersion", CallIqConfig.appVersion(ctx))
+                putDouble("syncOkAt", p.getLong(DeviceCheckin.KEY_SYNC_OK_AT, 0L).toDouble())
+                putString("syncError", p.getString(DeviceCheckin.KEY_SYNC_ERR, "") ?: "")
+                putDouble("syncErrorAt", p.getLong(DeviceCheckin.KEY_SYNC_ERR_AT, 0L).toDouble())
+                putDouble("bgRunAt", p.getLong(DeviceCheckin.KEY_BG_RUN_AT, 0L).toDouble())
+                putDouble("checkinAt", DeviceCheckin.lastAt(ctx).toDouble())
+                putString("checkinError", DeviceCheckin.lastError(ctx))
+            })
+        } catch (e: Throwable) {
+            promise.reject("setup_state_failed", e)
+        }
+    }
+
+    /**
+     * Asks for every runtime permission still missing, in one go, and resolves with the ANSWER —
+     * not the moment the dialog opens. A permission refused with "Don't ask again" can never be
+     * asked for by an app again; it is reported as `blocked`, so the app can send the counselor
+     * to App info → Permissions instead of tapping a button that silently does nothing.
+     */
+    @ReactMethod
+    fun requestCorePermissions(promise: Promise) {
+        val ctx = reactApplicationContext
+        val wanted = SetupState.runtimeWanted(ctx)
+        fun answer(error: String? = null) = Arguments.createMap().apply {
+            putBoolean("granted", SetupState.phoneGranted(ctx))
+            val blocked = Arguments.createArray()
+            val act = currentActivity
+            if (act != null) {
+                SetupState.CORE.filter {
+                    ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED &&
+                        !ActivityCompat.shouldShowRequestPermissionRationale(act, it)
+                }.forEach { blocked.pushString(it) }
+            }
+            putArray("blocked", blocked)
+            if (error != null) putString("error", error)
+        }
+        if (wanted.isEmpty()) { promise.resolve(answer()); return }
+
+        val act = currentActivity as? com.facebook.react.modules.core.PermissionAwareActivity
+        if (act == null) { promise.resolve(answer("no_activity")); return }
+
+        var settled = false
+        try {
+            act.requestPermissions(wanted.toTypedArray(), 4711, com.facebook.react.modules.core.PermissionListener { code, _, _ ->
+                if (code != 4711) return@PermissionListener false
+                if (!settled) { settled = true; promise.resolve(answer()) }
+                true
+            })
+        } catch (e: Throwable) {
+            if (!settled) { settled = true; promise.resolve(answer(e.message ?: "request_failed")) }
+        }
+    }
+
+    /** Opens the exact screen for one step, from the app's own screen so Back returns here. */
+    @ReactMethod
+    fun openSetupStep(key: String, promise: Promise) {
+        try {
+            promise.resolve(SetupState.open(currentActivity ?: reactApplicationContext, key))
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /** For the switches a phone will not report: the counselor's word, until the phone says otherwise. */
+    @ReactMethod
+    fun confirmSetupStep(key: String, on: Boolean, promise: Promise) {
+        try {
+            SetupState.confirm(reactApplicationContext, key, on)
+            DeviceCheckin.maybeSend(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /** "Test connection": sends this phone's setup to the panel now, and says in words what happened. */
+    @ReactMethod
+    fun testConnection(promise: Promise) {
+        val ctx = reactApplicationContext
+        Thread {
+            val (ok, msg) = try { DeviceCheckin.sendNow(ctx, DeviceCheckin.pendingUploads(ctx)) }
+                            catch (e: Throwable) { false to (e.message ?: "failed") }
+            promise.resolve(Arguments.createMap().apply { putBoolean("ok", ok); putString("message", msg) })
+        }.start()
+    }
+
     /**
      * Rehearse a real call ending, using the same code path the phone-state receiver takes — the
      * honest way to prove the popup works without having to call someone.

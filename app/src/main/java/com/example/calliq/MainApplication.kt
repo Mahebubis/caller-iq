@@ -35,5 +35,8 @@ class MainApplication : Application(), ReactApplication {
         CallPresence.clearIfIdle(this)
         /* Keeps the panel's SIM register current by itself, when the counselor has allowed it. */
         if (CallIqConfig.ussdEnabled(this)) UssdWorker.scheduleDaily(this)
+        /* The safety net for calls the call-ended broadcast never delivered (MIUI, ColorOS, Vivo
+           without Autostart). Costs nothing when there is nothing new; see CatchUpWorker. */
+        CatchUpWorker.schedule(this)
     }
 }

@@ -205,7 +205,7 @@ object CallPresence {
             put("started_at", started)
             if (answered > 0) put("answered_at", answered)
             put("event_at", System.currentTimeMillis())
-            put("popup_ok", CallIqConfig.popupEnabled(context) && CallPopupOverlay.canShow(context))
+            put("popup_ok", SetupState.popupReady(context))
             sim.slot?.let { put("sim_slot", it) }
             if (sim.carrier.isNotEmpty()) put("carrier", sim.carrier)
             if (sim.label.isNotEmpty()) put("sim_label", sim.label)

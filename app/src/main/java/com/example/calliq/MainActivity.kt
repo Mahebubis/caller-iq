@@ -16,4 +16,13 @@ class MainActivity : ReactActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
     }
+
+    override fun onResume() {
+        super.onResume()
+        // Back from Settings by whatever route — nothing left to watch for.
+        SetupWatcher.stop()
+        // A switch may have just been turned on: the panel hears about it now, not tomorrow.
+        // Local comparison first; this only sends when something actually changed.
+        DeviceCheckin.maybeSend(this)
+    }
 }
