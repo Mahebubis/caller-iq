@@ -22,11 +22,11 @@ import java.util.concurrent.TimeUnit
  *
  * What Android will and will not tell an ordinary app:
  *  - incoming: the number arrives with the RINGING broadcast (needs READ_CALL_LOG, which we hold).
- *  - outgoing: there is NO number until the call ends. Since Android 10 only the default dialer
- *    receives NEW_OUTGOING_CALL, and the call-log row is written after hang-up. The dashboard says
- *    so rather than inventing one, and fills it in when the call syncs.
- *  - "ringing" for an outgoing call is equally invisible — OFFHOOK covers dialling and talking
- *    alike, so an outgoing call is reported as in progress from the moment it is dialled.
+ *  - outgoing: the number arrives with the repeat OFFHOOK broadcast (READ_CALL_LOG holders get
+ *    one carrying the number of the call on the line) — see onOffHook.
+ *  - when an outgoing call is ANSWERED is invisible to any app but the default dialer: OFFHOOK
+ *    covers dialling and talking alike, so an outgoing call is shown from the moment it is dialled
+ *    and its real talk time arrives from the call log when it ends.
  */
 object CallPresence {
 
@@ -165,7 +165,9 @@ object CallPresence {
             if (record.number.isNotEmpty()) put("number", record.number)
             put("started_at", record.timestamp)
             put("event_at", System.currentTimeMillis())
-            put("duration_sec", record.duration)
+            // A missed or declined call was never talked on — Xiaomi writes its RING time here.
+            val talked = !(record.callType.startsWith("MISSED") || record.callType.startsWith("REJECTED") || record.callType.startsWith("BLOCKED"))
+            put("duration_sec", if (talked) record.duration else 0L)
             record.sim.slot?.let { put("sim_slot", it) }
             if (record.sim.carrier.isNotEmpty()) put("carrier", record.sim.carrier)
             if (record.sim.label.isNotEmpty()) put("sim_label", record.sim.label)

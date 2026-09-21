@@ -212,13 +212,15 @@ const App = (): React.JSX.Element => {
   };
 
   // Formatters
+  /** Same as the dashboard: '45s' under a minute, '02:04' from a minute, '1:02:04' from an hour. */
   const formatDuration = (seconds: number): string => {
-    if (!seconds || seconds <= 0 || isNaN(seconds)) return '00:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    const mm = m < 10 ? `0${m}` : `${m}`;
-    const ss = s < 10 ? `0${s}` : `${s}`;
-    return `${mm}:${ss}`;
+    const t = Math.max(0, Math.round(Number(seconds) || 0));
+    if (t < 60) return `${t}s`;
+    const two = (n: number) => String(n).padStart(2, '0');
+    const h = Math.floor(t / 3600);
+    const m = Math.floor((t % 3600) / 60);
+    const r = t % 60;
+    return h ? `${h}:${two(m)}:${two(r)}` : `${two(m)}:${two(r)}`;
   };
 
   const formatTotalTalkTime = (totalSeconds: number): string => {

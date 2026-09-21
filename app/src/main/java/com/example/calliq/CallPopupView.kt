@@ -51,9 +51,13 @@ object CallPopupView {
 
     fun duration(seconds: Long): String {
         if (seconds <= 0) return "not connected"
-        val m = seconds / 60
+        // Same format as the dashboard: "45s" under a minute, "02:04" from a minute, "1:02:04" from an hour.
+        if (seconds < 60) return "${seconds}s"
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
         val s = seconds % 60
-        return if (m > 0) "${m}m ${s}s" else "${s}s"
+        return if (h > 0) String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s)
+               else String.format(java.util.Locale.US, "%02d:%02d", m, s)
     }
 
     /** "Incoming · 4m 12s · SIM 2 · Airtel" */
