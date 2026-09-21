@@ -7,6 +7,9 @@ import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Live call presence — what the dashboard's "Live now" strip is made of.
@@ -47,7 +50,24 @@ object CallPresence {
 
     /* ── Call bookkeeping ─────────────────────────────────────────────────── */
 
+    /** A call is already up on this phone — talking, or one the counselor placed. */
+    private fun inCall(context: Context): Boolean {
+        val prefs = CallIqConfig.prefs(context)
+        if (prefs.getLong(KEY_STARTED_AT, 0L) <= 0L) return false
+        return prefs.getLong(KEY_ANSWERED_AT, 0L) > 0L || prefs.getString(KEY_DIRECTION, "") == DIR_OUTGOING
+    }
+
     fun onRinging(context: Context, number: String?) {
+        /*
+         * Call waiting: a second call ringing while one is already up. Android reports it as
+         * RINGING, and treating that as a new call would throw away the call actually in progress
+         * (and then mark the original as a freshly "answered" incoming one). The call on the line
+         * stays the live one; the waiting call reaches the panel from the call log if it is missed.
+         */
+        if (inCall(context)) {
+            Log.d(TAG, "Call waiting — keeping the call already in progress")
+            return
+        }
         val prefs = CallIqConfig.prefs(context)
         val now = System.currentTimeMillis()
         prefs.edit()
@@ -68,24 +88,53 @@ object CallPresence {
         if (prefs.getLong(KEY_STARTED_AT, 0L) <= 0L) return           // no call open
         if (!(prefs.getString(KEY_NUMBER, "") ?: "").isEmpty()) return // already known
         prefs.edit().putString(KEY_NUMBER, number).apply()
-        Log.d(TAG, "Learned the caller's number after the first ring")
-        send(context, STATE_RINGING)
+        Log.d(TAG, "Learned the number from the repeat broadcast")
+        // Re-send the state the call is actually in: re-sending "ringing" for a call already off
+        // hook is refused by the server as going backwards, and the number would be lost.
+        send(context, if (inCall(context)) STATE_CONNECTED else STATE_RINGING)
     }
 
-    fun onOffHook(context: Context) {
+    /**
+     * The line went off hook. Called for EVERY off-hook broadcast — Android sends two, and the
+     * second (to apps holding READ_CALL_LOG) carries the number of the call on the line, outgoing
+     * calls included. So this must be idempotent, and must never drop that number.
+     *
+     *  - an incoming call that was ringing  → it was answered: the talk timer starts now
+     *  - a call already up (repeat broadcast, or back from call waiting) → only fill the number
+     *  - no ring before it                   → the counselor placed this call: OUTGOING
+     *
+     * An outgoing call gets no "answered" time, on purpose: Android reports dialling and talking
+     * as the same off-hook state, so any answer time here would be invented. The panel counts an
+     * outgoing call from when it was dialled, says so, and swaps in the real talk time from the
+     * call log the moment the call ends.
+     */
+    fun onOffHook(context: Context, number: String? = null) {
         val prefs = CallIqConfig.prefs(context)
         val now = System.currentTimeMillis()
-        val hadRing = prefs.getString(KEY_DIRECTION, "") == DIR_INCOMING && prefs.getLong(KEY_STARTED_AT, 0L) > 0
-        if (!hadRing) {
-            // No ring before going off hook: the counselor placed this call.
-            prefs.edit()
-                .putLong(KEY_STARTED_AT, now)
-                .putString(KEY_DIRECTION, DIR_OUTGOING)
-                .putString(KEY_NUMBER, "")
-                .apply()
+        val started = prefs.getLong(KEY_STARTED_AT, 0L)
+        val direction = prefs.getString(KEY_DIRECTION, "") ?: ""
+        val answered = prefs.getLong(KEY_ANSWERED_AT, 0L)
+
+        when {
+            started > 0 && direction == DIR_INCOMING && answered <= 0L -> {
+                val ed = prefs.edit().putLong(KEY_ANSWERED_AT, now)
+                if (!number.isNullOrBlank() && (prefs.getString(KEY_NUMBER, "") ?: "").isEmpty()) ed.putString(KEY_NUMBER, number)
+                ed.apply()
+                send(context, STATE_CONNECTED)
+            }
+            started > 0 -> {
+                if (!number.isNullOrBlank()) fillNumber(context, number)
+            }
+            else -> {
+                prefs.edit()
+                    .putLong(KEY_STARTED_AT, now)
+                    .putString(KEY_DIRECTION, DIR_OUTGOING)
+                    .putString(KEY_NUMBER, number ?: "")
+                    .remove(KEY_ANSWERED_AT)
+                    .apply()
+                send(context, STATE_CONNECTED)
+            }
         }
-        prefs.edit().putLong(KEY_ANSWERED_AT, now).apply()
-        send(context, STATE_CONNECTED)
     }
 
     fun onIdle(context: Context) {
@@ -121,7 +170,7 @@ object CallPresence {
             if (record.sim.carrier.isNotEmpty()) put("carrier", record.sim.carrier)
             if (record.sim.label.isNotEmpty()) put("sim_label", record.sim.label)
         }.toString()
-        Thread { post(endpoint(app), body) }.start()
+        sender.execute { post(endpoint(app), body) }   // after "ended", never before it
     }
 
     /**
@@ -151,7 +200,12 @@ object CallPresence {
             direction == DIR_OUTGOING -> "OUTGOING"
             else -> "UNKNOWN"
         }
-        val duration = if (answered > 0L) ((now - answered) / 1000).coerceAtLeast(0L) else 0L
+        // Provisional until the call-log row arrives a moment later with the real talk time.
+        val duration = when {
+            answered > 0L -> ((now - answered) / 1000).coerceAtLeast(0L)
+            direction == DIR_OUTGOING -> ((now - started) / 1000).coerceAtLeast(0L)
+            else -> 0L
+        }
 
         return CallLogHelper.CallRecord(
             number = number,
@@ -216,16 +270,62 @@ object CallPresence {
      * Fire the event now on a background thread, and queue a worker as the safety net: it retries a
      * failed send and keeps the call alive on the dashboard until it really ends.
      */
+    /*
+     * One sender thread for every live event, in order.
+     *
+     * Events used to go out on a fresh Thread each, fired from the broadcast receiver and then
+     * left running after it returned. Two problems, both invisible while the phone was attached to
+     * Android Studio: separate threads could deliver "connected" before "ringing"; and once the
+     * receiver returns, Android treats the process as cached — Android 14+ FREEZES cached
+     * processes within seconds (Xiaomi and Oppo simply kill them), so the request stalled mid-send
+     * and the dashboard never heard about the call. A debugger attached from Android Studio keeps
+     * the process from ever being frozen, which is exactly why it only worked plugged in.
+     *
+     * Now events queue on one thread, and the receiver waits for the queue ([flush]) through
+     * goAsync() before letting Android put the process away.
+     */
+    private val sender: ExecutorService = Executors.newSingleThreadExecutor { r -> Thread(r, "ciq-live").apply { isDaemon = true } }
+
     private fun send(context: Context, state: String) {
         val app = context.applicationContext
         val body = payload(app, state).toString()
-        Thread {
+        sender.execute {
             val ok = post(endpoint(app), body)
-            if (!ok) Log.w(TAG, "Live '$state' did not reach the server; the worker will retry.")
-        }.start()
-        // The direct send is best effort (no network, dozing radio, server blip), so the worker
-        // always backs it up — and while the call is still up it keeps heartbeating.
-        CallPresenceWorker.schedule(app, delaySeconds = if (state == STATE_ENDED) 0L else 5L)
+            if (!ok) Log.w(TAG, "Live '$state' did not reach the server; the next heartbeat re-sends it.")
+        }
+        // With the monitor service running, the process stays alive and the service heartbeats
+        // (see CallMonitorService). Without it, WorkManager is the only thing left to retry.
+        if (!CallMonitorService.isRunning) {
+            CallPresenceWorker.schedule(app, delaySeconds = if (state == STATE_ENDED) 0L else 5L)
+        }
+    }
+
+    /** Blocks until every event queued so far has been sent (or [timeoutMs] passes). Never on the main thread. */
+    fun flush(timeoutMs: Long) {
+        try {
+            sender.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: Throwable) {
+            Log.w(TAG, "flush: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * Re-sends the current call's state, read fresh from Android — so a lost event is recovered
+     * and a missed hang-up still closes the call. Called by the monitor service while a call is up.
+     */
+    fun heartbeat(context: Context) {
+        val app = context.applicationContext
+        if (!hasOpenCall(app)) return
+        val tm = try { app.getSystemService(TelephonyManager::class.java) } catch (e: Throwable) { null }
+        @Suppress("DEPRECATION")
+        val callState = try { tm?.callState ?: TelephonyManager.CALL_STATE_IDLE } catch (e: Throwable) { TelephonyManager.CALL_STATE_IDLE }
+        if (callState == TelephonyManager.CALL_STATE_IDLE) {
+            onIdle(app)
+            return
+        }
+        val state = if (callState == TelephonyManager.CALL_STATE_RINGING && !inCall(app)) STATE_RINGING else STATE_CONNECTED
+        val body = payload(app, state).toString()
+        sender.execute { post(endpoint(app), body) }
     }
 
     fun post(url: String, body: String): Boolean = try {

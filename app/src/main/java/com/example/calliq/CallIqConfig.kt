@@ -71,6 +71,12 @@ object CallIqConfig {
     const val KEY_USSD_ENABLED = "USSD_ENABLED"
     fun ussdEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_USSD_ENABLED, false)
 
+    /* Keep CallIQ running (CallMonitorService). On by default: without it Android freezes or kills
+       the app between calls and live calls go missing. Switchable in the app for anyone who
+       would rather not see its quiet notification. */
+    const val KEY_MONITOR_ENABLED = "MONITOR_ENABLED"
+    fun monitorEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_MONITOR_ENABLED, true)
+
     fun popupEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_ENABLED, true)
     fun popupForMissed(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_MISSED, true)
     fun popupTimeoutSec(context: Context): Int = prefs(context).getInt(KEY_POPUP_TIMEOUT, 45).coerceIn(10, 300)

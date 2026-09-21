@@ -168,7 +168,7 @@ object SetupState {
         out += Step(
             "phone", "Call logs & phone",
             "So the app can see a call ended, who it was with, and which SIM it used.",
-            "Tap Allow on each question.",
+            "Tap Allow on each question. If Android says “Restricted setting”, open App info → ⋮ (top right) → Allow restricted settings, then try again.",
             if (phoneGranted(ctx)) DONE else TODO, true, "dialog",
         )
 
@@ -177,7 +177,7 @@ object SetupState {
         out += Step(
             "overlay", "Display over other apps",
             "Android draws nothing over the dialer without this — it is what makes the popup appear after a call.",
-            "Switch on “Allow display over other apps” for CallIQ.",
+            "Switch on “Allow display over other apps” for CallIQ. If it is greyed out as a “Restricted setting”, open App info → ⋮ → Allow restricted settings first.",
             if (overlayOn(ctx)) DONE else TODO, true, "screen",
         )
 

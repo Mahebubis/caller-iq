@@ -80,6 +80,9 @@ object DeviceCheckin {
                 // The phone's own clock at sending, so the panel compares phone time with phone
                 // time ("background last ran 9 h before this report") and never mixes two clocks.
                 put("sent_at", System.currentTimeMillis())
+                // Is CallIQ being kept alive between calls? Without it live calls go missing.
+                put("monitor_enabled", CallIqConfig.monitorEnabled(ctx))
+                put("monitor", CallMonitorService.isRunning)
                 if (pending != null) put("pending_uploads", pending)
             })
         }
@@ -95,6 +98,7 @@ object DeviceCheckin {
         append('|').append(SimResolver.activeSubscriptions(ctx).size)
         SetupState.steps(ctx).forEach { append('|').append(it.key).append('=').append(it.status) }
         append('|').append(CallIqConfig.endpoint(ctx))
+        append('|').append(CallIqConfig.monitorEnabled(ctx)).append(CallMonitorService.isRunning)
     }
 
     /** Cheap and local: queues a check-in only when something changed, or the heartbeat is due. */

@@ -8,10 +8,19 @@ import android.os.Looper
 import android.telephony.TelephonyManager
 import android.util.Log
 
-class CallReceiver : BroadcastReceiver() {
+/**
+ * Every call-state change: RINGING → OFFHOOK → IDLE.
+ *
+ * Two instances can exist: the one declared in the manifest (Android starts the app for it even
+ * when it is not running), and one registered at runtime by [CallMonitorService] while that is
+ * up. Both receive every broadcast, so when the service's copy is live the manifest one stands
+ * aside — otherwise each event would be handled twice.
+ */
+class CallReceiver(private val viaService: Boolean = false) : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
+        if (!viaService && CallMonitorService.isRunning) return
 
         val stateStr = intent.getStringExtra(TelephonyManager.EXTRA_STATE) ?: return
         val prefs = context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE)
@@ -30,26 +39,38 @@ class CallReceiver : BroadcastReceiver() {
                  */
                 SimResolver.captureActiveSim(context.applicationContext)
 
-                // Tell the dashboard the call is happening, now — the call log will not exist
-                // until it ends. RINGING carries the caller's number; OFFHOOK never does.
+                /*
+                 * Tell the dashboard the call is happening, now — the call log will not exist
+                 * until it ends.
+                 *
+                 * Android delivers every state change TWICE: once to every app with no number, and
+                 * again to apps holding READ_CALL_LOG WITH the number of the call on the line —
+                 * the caller for RINGING, and for OFFHOOK the call being made, outgoing included.
+                 * In either order. So a repeat is never simply dropped: it fills in the number.
+                 */
                 val app = context.applicationContext
+                @Suppress("DEPRECATION")
+                val number = try { intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER) } catch (e: Throwable) { null }
                 if (stateStr == TelephonyManager.EXTRA_STATE_RINGING) {
-                    @Suppress("DEPRECATION")
-                    val incoming = try { intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER) } catch (e: Throwable) { null }
-                    /*
-                     * Android delivers RINGING TWICE: once to every app, with no number, and again
-                     * to apps holding READ_CALL_LOG, WITH the caller's number. Treating the repeat
-                     * as a duplicate — which it looks like — throws away the only chance to learn
-                     * who is calling, which is why live calls read "Unknown number". So: the first
-                     * one starts the call, and a later one only fills in the number it carries.
-                     */
-                    if (prevState != TelephonyManager.EXTRA_STATE_RINGING) CallPresence.onRinging(app, incoming)
-                    else if (!incoming.isNullOrBlank()) CallPresence.fillNumber(app, incoming)
-                } else if (prevState != TelephonyManager.EXTRA_STATE_OFFHOOK) {
-                    CallPresence.onOffHook(app)
+                    if (prevState != TelephonyManager.EXTRA_STATE_RINGING) CallPresence.onRinging(app, number)
+                    else if (!number.isNullOrBlank()) CallPresence.fillNumber(app, number)
+                } else {
+                    // Idempotent: works out for itself whether this is an answer, a placed call
+                    // or a repeat, so both broadcasts can go straight to it.
+                    CallPresence.onOffHook(app, number)
                 }
 
                 prefs.edit().putString("PREV_STATE", stateStr).apply()
+
+                // A call is starting: make sure the monitor is up for the rest of it (a no-op if
+                // it already is, and quietly refused by Android where it is not allowed).
+                if (CallMonitorService.isRunning) CallMonitorService.poke() else CallMonitorService.start(app)
+
+                // Keep this process awake until the event has actually left the phone.
+                val pending = goAsync()
+                Thread {
+                    try { CallPresence.flush(8_000) } finally { pending.finish() }
+                }.start()
             }
             TelephonyManager.EXTRA_STATE_IDLE -> {
                 /*
@@ -88,9 +109,13 @@ class CallReceiver : BroadcastReceiver() {
                             syncAndPrompt(app, promptIfNotShowing = snapshot == null)
                         } catch (e: Exception) {
                             Log.e("CallReceiver", "Error querying call logs after delay: ${e.message}", e)
-                        } finally {
-                            pendingResult.finish()
                         }
+                        // The "ended" event and the real talk time must leave the phone before
+                        // Android is allowed to freeze this process — off the main thread.
+                        // 2.5 s already spent above; stay well inside the 10 s receiver limit.
+                        Thread {
+                            try { CallPresence.flush(6_000) } finally { pendingResult.finish() }
+                        }.start()
                     }, 2500)
                 }
             }

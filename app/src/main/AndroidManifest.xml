@@ -20,6 +20,14 @@
          read a plan's validity. Android exposes no other way to learn it. -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
 
+    <!-- Keeps CallIQ running between calls (CallMonitorService). Without it Android 14+ freezes
+         the app and Xiaomi/Oppo/Samsung kill it, so live calls stop reaching the panel.
+         "specialUse" because no standard type fits: this app is not the phone's dialer. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Restart tracking after the phone reboots or CallIQ updates. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <queries>
         <!-- Package visibility declarations for OEM/ColorOS system framework services -->
         <package android:name="com.oplus.aiseal" />
@@ -76,6 +84,25 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".CallMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Tracks the counselor's call states (ringing, on call, ended) so a company CRM can show live calls and log every call." />
+        </service>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
 

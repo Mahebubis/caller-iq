@@ -75,6 +75,8 @@ export interface SetupInfo {
   bgRunAt: number;
   checkinAt: number;
   checkinError: string;
+  monitorEnabled?: boolean;
+  monitorRunning?: boolean;
 }
 
 const agoText = (ms: number): string => {
@@ -641,6 +643,25 @@ const App = (): React.JSX.Element => {
     if (wizardRef.current.on) finishWizard(setup);
     setAskConfirm(null);
     setIsPopupSetupOpen(false);
+  };
+
+  /* "Keep CallIQ running": the foreground service that stops Android freezing or killing the app
+     between calls — without it, live calls and uploads go missing on an installed APK. */
+  const toggleMonitor = async (on: boolean) => {
+    if (!on) {
+      Alert.alert(
+        'Turn off background tracking?',
+        'Android will then freeze or close CallIQ between calls, and live calls may stop showing on the dashboard.',
+        [
+          { text: 'Keep it on', style: 'cancel' },
+          { text: 'Turn off', style: 'destructive', onPress: async () => { await CallBridge?.setMonitorEnabled?.(false); addLog('Background tracking switched off.'); setTimeout(loadSetup, 600); } },
+        ],
+      );
+      return;
+    }
+    await CallBridge?.setMonitorEnabled?.(true);
+    addLog('Background tracking switched on.');
+    setTimeout(loadSetup, 800);
   };
 
   const handleTestConnection = async () => {
@@ -1240,6 +1261,23 @@ const App = (): React.JSX.Element => {
             </View>
 
             <ScrollView style={{ maxHeight: 540 }} keyboardShouldPersistTaps="handled">
+              {setup && typeof setup.monitorEnabled === 'boolean' && (
+                <Pressable style={styles.settingRow} onPress={() => toggleMonitor(!setup.monitorEnabled)}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingTitle}>
+                      Keep CallIQ running <Text style={styles.settingDesc}>· recommended</Text>
+                    </Text>
+                    <Text style={styles.settingDesc}>
+                      Stops Android pausing the app between calls, so every call — and every live call — reaches the
+                      dashboard. Shows a quiet “CallIQ is tracking calls” notification.
+                    </Text>
+                  </View>
+                  <View style={[styles.toggle, setup.monitorEnabled && styles.toggleOn]}>
+                    <View style={[styles.toggleKnob, setup.monitorEnabled && styles.toggleKnobOn]} />
+                  </View>
+                </Pressable>
+              )}
+
               {/* The one button */}
               {setup && setup.steps.some((x) => !x.ok) && !wizardOn && !askConfirm && (
                 <Pressable
@@ -1361,6 +1399,13 @@ const App = (): React.JSX.Element => {
               {setup && (
                 <View style={styles.healthBox}>
                   <Text style={styles.noteBoxTitle}>Is it working?</Text>
+                  {typeof setup.monitorEnabled === 'boolean' && (
+                    <HealthRow
+                      label="Kept running between calls"
+                      value={setup.monitorRunning ? 'Yes' : setup.monitorEnabled ? 'Not yet — close and reopen CallIQ' : 'Switched off'}
+                      bad={!setup.monitorRunning}
+                    />
+                  )}
                   <HealthRow
                     label="Calls last uploaded"
                     value={setup.syncError ? `Failing — ${setup.syncError}` : agoText(setup.syncOkAt)}

@@ -249,6 +249,8 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 putDouble("bgRunAt", p.getLong(DeviceCheckin.KEY_BG_RUN_AT, 0L).toDouble())
                 putDouble("checkinAt", DeviceCheckin.lastAt(ctx).toDouble())
                 putString("checkinError", DeviceCheckin.lastError(ctx))
+                putBoolean("monitorEnabled", CallIqConfig.monitorEnabled(ctx))
+                putBoolean("monitorRunning", CallMonitorService.isRunning)
             })
         } catch (e: Throwable) {
             promise.reject("setup_state_failed", e)
@@ -311,6 +313,19 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         try {
             SetupState.confirm(reactApplicationContext, key, on)
             DeviceCheckin.maybeSend(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /** "Keep CallIQ running": the foreground service that stops Android freezing the app between calls. */
+    @ReactMethod
+    fun setMonitorEnabled(on: Boolean, promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            CallIqConfig.prefs(ctx).edit().putBoolean(CallIqConfig.KEY_MONITOR_ENABLED, on).apply()
+            if (on) CallMonitorService.start(currentActivity ?: ctx) else CallMonitorService.stop(ctx)
             promise.resolve(true)
         } catch (e: Throwable) {
             promise.resolve(false)
