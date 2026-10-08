@@ -234,6 +234,7 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 })
             }
             promise.resolve(Arguments.createMap().apply {
+                putString("deviceId", CallIqConfig.deviceId(ctx))
                 putArray("steps", arr)
                 putInt("requiredLeft", steps.count { it.required && !it.ok })
                 putInt("optionalLeft", steps.count { !it.required && !it.ok })

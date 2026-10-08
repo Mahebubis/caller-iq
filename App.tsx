@@ -14,6 +14,7 @@ import {
   ScrollView,
   AppState,
   BackHandler,
+  Linking,
 } from 'react-native';
 
 const { CallBridge } = NativeModules;
@@ -164,10 +165,16 @@ const App = (): React.JSX.Element => {
   const [pendingQueueCount, setPendingQueueCount] = useState<number>(0);
 
   // Feed & Filter State
+  const [activeTab, setActiveTab] = useState<'feed' | 'imports'>('feed');
   const [callLogs, setCallLogs] = useState<CallLogItem[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedFilter, setSelectedFilter] = useState<'ALL' | 'INCOMING' | 'OUTGOING' | 'MISSED'>('ALL');
   const [simNicknames, setSimNicknames] = useState<SimNicknameMap>(DEFAULT_SIM_MAPPING);
+
+  // Imports State
+  const [importsList, setImportsList] = useState<any[]>([]);
+  const [importsListName, setImportsListName] = useState<string>('IMPORTED SEGMENT');
+  const [loadingImports, setLoadingImports] = useState<boolean>(false);
 
   // Modals & Interactivity
   const [activeDispositionCall, setActiveDispositionCall] = useState<CallLogItem | null>(null);
@@ -336,6 +343,11 @@ const App = (): React.JSX.Element => {
         if (typeof statusRes.popupTimeoutSec === 'number') setPopupTimeout(statusRes.popupTimeoutSec);
       }
 
+      // Fetch dummy import records (mock logic)
+      if (activeTab === 'imports') {
+        fetchImports();
+      }
+
       if (CallBridge?.getPopupReadiness) {
         try {
           setReadiness(await withTimeout<any>(CallBridge.getPopupReadiness().catch(() => null), 1500, null));
@@ -455,13 +467,16 @@ const App = (): React.JSX.Element => {
       if (nextAppState === 'active') {
         addLog('App returned to foreground: refreshing calls...');
         fetchSystemData();
+        if (activeTab === 'imports') {
+          fetchImports();
+        }
       }
     });
 
     return () => {
       subscription.remove();
     };
-  }, [fetchSystemData]);
+  }, [fetchSystemData, activeTab]); // Added activeTab to dependencies so it uses the latest value
 
   const handleManualRefresh = () => {
     addLog('Manual refresh triggered.');
@@ -931,6 +946,92 @@ const App = (): React.JSX.Element => {
     return list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [callLogs, selectedFilter, searchQuery]);
 
+  // Paste to Dialer / Click to Call logic
+  const handleDial = (phoneNumber: string | undefined | null) => {
+    if (!phoneNumber) return;
+    const url = `tel:${phoneNumber}`;
+    Linking.canOpenURL(url)
+      .then((supported) => {
+        if (!supported) {
+          Alert.alert('Unsupported', 'This device does not support opening the dialer.');
+        } else {
+          return Linking.openURL(url);
+        }
+      })
+      .catch((err) => addLog(`Dialer error: ${err.message || err}`));
+  };
+
+  // Fetch Live Imports from the API
+  const fetchImports = async () => {
+    setLoadingImports(true);
+    try {
+      let deviceId = '';
+      if (CallBridge?.getSetupState) {
+          try {
+              const st = await CallBridge.getSetupState();
+              deviceId = st?.deviceId || '';
+          } catch (_) {}
+      }
+
+      // 1. Get the list of all imports
+      const listResponse = await fetch('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/imports.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ action: 'list', device_id: deviceId }),
+      });
+
+      // If the backend returns 401/403, we need to handle that gracefully
+      if (!listResponse.ok) {
+        throw new Error(`HTTP Error ${listResponse.status}`);
+      }
+
+      const listData = await listResponse.json();
+
+      if (listData.status === 'success' && listData.data?.imports?.length > 0) {
+        // 2. Grab the first/latest import ID
+        const latestImport = listData.data.imports[0];
+        const latestImportId = latestImport.id;
+        setImportsListName(latestImport.name || 'IMPORTED SEGMENT');
+
+        // 3. Fetch the rows/details for that specific import
+        const detailResponse = await fetch('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/imports.php', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ action: 'detail', id: latestImportId, device_id: deviceId }),
+        });
+        const detailData = await detailResponse.json();
+
+        if (detailData.status === 'success' && detailData.data?.rows) {
+          // 4. Map the API rows to our UI format
+          const mappedStudents = detailData.data.rows.map((row: any) => {
+            let callStatus = 'Not called';
+            if (row.connected > 0) callStatus = 'Connected';
+            else if (row.total > 0) callStatus = 'Not connected';
+            else if (row.called_by) callStatus = 'Called (marked)';
+
+            return {
+              id: row.id || row.row_no,
+              name: row.name || 'Unknown',
+              email: row.email || '',
+              phone: row.phone_norm || row.phone_raw || '',
+              status: callStatus,
+            };
+          });
+          setImportsList(mappedStudents);
+        } else {
+          setImportsList([]);
+        }
+      } else {
+        setImportsList([]); // No imports found
+      }
+    } catch (error) {
+      addLog(`Imports API Error: ${error}`);
+      Alert.alert('Error', 'Could not load imports. Check if the API requires a JWT token or is blocking the request.');
+    } finally {
+      setLoadingImports(false);
+    }
+  };
+
   // Call Type Details
   const getCallTypeDetails = (type: string) => {
     switch (type ? type.toUpperCase() : '') {
@@ -1100,125 +1201,219 @@ const App = (): React.JSX.Element => {
           </View>
         </View>
 
-        {/* Search & Filter Bar */}
-        <View style={styles.searchContainer}>
-          <Text style={styles.searchIcon}>🔍</Text>
-          <TextInput
-            style={styles.searchInput}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            placeholder="Search number, outcome, or SIM..."
-            placeholderTextColor="#94A3B8"
-          />
-          {searchQuery.length > 0 && (
-            <Pressable onPress={() => setSearchQuery('')}>
-              <Text style={styles.clearSearchText}>✕</Text>
-            </Pressable>
-          )}
-        </View>
-
-        {/* Filter Tabs */}
-        <View style={styles.filterTabRow}>
-          {(['ALL', 'INCOMING', 'OUTGOING', 'MISSED'] as const).map((tab) => {
-            const active = selectedFilter === tab;
-            return (
-              <Pressable
-                key={tab}
-                style={({ pressed }) => [
-                  styles.filterTab,
-                  active && styles.filterTabActive,
-                  pressed && { opacity: 0.8 },
-                ]}
-                onPress={() => setSelectedFilter(tab)}
-              >
-                <Text style={[styles.filterTabText, active && styles.filterTabTextActive]}>
-                  {tab}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        {/* Call Feed Header */}
-        <View style={styles.feedHeaderRow}>
-          <Text style={styles.sectionHeaderTitle}>
-            LIVE DEVICE CALL FEED ({filteredCalls.length})
-          </Text>
-          <Pressable onPress={handleManualRefresh} disabled={loading}>
-            <Text style={styles.refreshLink}>{loading ? 'Refreshing...' : '🔄 Refresh Feed'}</Text>
+        {/* Top-Level Navigation Tabs */}
+        <View style={styles.topNavContainer}>
+          <Pressable
+            style={[styles.topNavTab, activeTab === 'feed' && styles.topNavTabActive]}
+            onPress={() => setActiveTab('feed')}
+          >
+            <Text style={[styles.topNavText, activeTab === 'feed' && styles.topNavTextActive]}>Call Logs</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.topNavTab, activeTab === 'imports' && styles.topNavTabActive]}
+            onPress={() => {
+              setActiveTab('imports');
+              fetchImports();
+            }}
+          >
+            <Text style={[styles.topNavText, activeTab === 'imports' && styles.topNavTextActive]}>Imports (Lists)</Text>
           </Pressable>
         </View>
 
-        {/* Live Call Feed Cards List */}
-        {loading ? (
-          <ActivityIndicator color="#4F46E5" style={{ marginVertical: 30 }} />
-        ) : filteredCalls.length === 0 ? (
-          <View style={styles.emptyFeedCard}>
-            <Text style={styles.emptyFeedTitle}>No calls found</Text>
-            <Text style={styles.emptyFeedSub}>
-              Recent calls logged on this device will automatically populate here.
-            </Text>
-          </View>
-        ) : (
-          filteredCalls.map((item) => {
-            if (!item) return null;
-            const typeInfo = getCallTypeDetails(item.callType);
-            return (
-              <View key={item.idempotencyKey || `${item.number}_${item.timestamp}`} style={styles.callCard}>
-                <View style={styles.callCardHeader}>
-                  <View style={styles.callCardLeft}>
-                    <View style={[styles.typeBadge, { backgroundColor: typeInfo.bg }]}>
-                      <Text style={[styles.typeBadgeText, { color: typeInfo.color }]}>
-                        {typeInfo.icon} {typeInfo.label}
-                      </Text>
-                    </View>
-                    <Text style={styles.callNumber}>{item.number}</Text>
-                  </View>
-                  <Text style={styles.callTime}>{formatRelativeTime(item.timestamp)}</Text>
-                </View>
+        {activeTab === 'feed' ? (
+          <>
+            {/* Search & Filter Bar */}
+            <View style={styles.searchContainer}>
+              <Text style={styles.searchIcon}>🔍</Text>
+              <TextInput
+                style={styles.searchInput}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search number, outcome, or SIM..."
+                placeholderTextColor="#94A3B8"
+              />
+              {searchQuery.length > 0 && (
+                <Pressable onPress={() => setSearchQuery('')}>
+                  <Text style={styles.clearSearchText}>✕</Text>
+                </Pressable>
+              )}
+            </View>
 
-                <View style={styles.callCardBody}>
-                  <Text style={styles.callMeta}>
-                    <Text style={item.simSlot ? styles.simOk : styles.simUnknown}>{getSimLabel(item.simId)}</Text>
-                    {item.simCarrier ? ` (${item.simCarrier})` : ''} • Duration: {formatDuration(item.duration)}
-                  </Text>
-                  {!item.simSlot && !!item.simSource && (
-                    <Text style={styles.simHint}>SIM {SIM_SOURCE_TEXT[item.simSource] || item.simSource}</Text>
-                  )}
-                  <View style={styles.syncIndicatorRow}>
-                    <Text
-                      style={[
-                        styles.syncIndicatorText,
-                        { color: item.synced ? '#059669' : '#D97706' },
-                      ]}
-                    >
-                      {item.synced ? '✓ Synced' : '⏳ Queued'}
+            {/* Filter Tabs */}
+            <View style={styles.filterTabRow}>
+              {(['ALL', 'INCOMING', 'OUTGOING', 'MISSED'] as const).map((tab) => {
+                const active = selectedFilter === tab;
+                return (
+                  <Pressable
+                    key={tab}
+                    style={({ pressed }) => [
+                      styles.filterTab,
+                      active && styles.filterTabActive,
+                      pressed && { opacity: 0.8 },
+                    ]}
+                    onPress={() => setSelectedFilter(tab)}
+                  >
+                    <Text style={[styles.filterTabText, active && styles.filterTabTextActive]}>
+                      {tab}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {/* Call Feed Header */}
+            <View style={styles.feedHeaderRow}>
+              <Text style={styles.sectionHeaderTitle}>
+                LIVE DEVICE CALL FEED ({filteredCalls.length})
+              </Text>
+              <Pressable onPress={handleManualRefresh} disabled={loading}>
+                <Text style={styles.refreshLink}>{loading ? 'Refreshing...' : '🔄 Refresh Feed'}</Text>
+              </Pressable>
+            </View>
+
+            {/* Live Call Feed Cards List */}
+            {loading ? (
+              <ActivityIndicator color="#4F46E5" style={{ marginVertical: 30 }} />
+            ) : filteredCalls.length === 0 ? (
+              <View style={styles.emptyFeedCard}>
+                <Text style={styles.emptyFeedTitle}>No calls found</Text>
+                <Text style={styles.emptyFeedSub}>
+                  Recent calls logged on this device will automatically populate here.
+                </Text>
+              </View>
+            ) : (
+              filteredCalls.map((item) => {
+                if (!item) return null;
+                const typeInfo = getCallTypeDetails(item.callType);
+                return (
+                  <View key={item.idempotencyKey || `${item.number}_${item.timestamp}`} style={styles.callCard}>
+                    <View style={styles.callCardHeader}>
+                      <View style={styles.callCardLeft}>
+                        <View style={[styles.typeBadge, { backgroundColor: typeInfo.bg }]}>
+                          <Text style={[styles.typeBadgeText, { color: typeInfo.color }]}>
+                            {typeInfo.icon} {typeInfo.label}
+                          </Text>
+                        </View>
+                        <Pressable
+                          style={({ pressed }) => [styles.dialPressable, pressed && { opacity: 0.6 }]}
+                          onPress={() => handleDial(item.number)}
+                        >
+                          <Text style={styles.callNumber}>{item.number}</Text>
+                          <Text style={styles.dialIcon}>📞</Text>
+                        </Pressable>
+                      </View>
+                      <Text style={styles.callTime}>{formatRelativeTime(item.timestamp)}</Text>
+                    </View>
+
+                    <View style={styles.callCardBody}>
+                      <Text style={styles.callMeta}>
+                        <Text style={item.simSlot ? styles.simOk : styles.simUnknown}>{getSimLabel(item.simId)}</Text>
+                        {item.simCarrier ? ` (${item.simCarrier})` : ''} • Duration: {formatDuration(item.duration)}
+                      </Text>
+                      {!item.simSlot && !!item.simSource && (
+                        <Text style={styles.simHint}>SIM {SIM_SOURCE_TEXT[item.simSource] || item.simSource}</Text>
+                      )}
+                      <View style={styles.syncIndicatorRow}>
+                        <Text
+                          style={[
+                            styles.syncIndicatorText,
+                            { color: item.synced ? '#059669' : '#D97706' },
+                          ]}
+                        >
+                          {item.synced ? '✓ Synced' : '⏳ Queued'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Post-Call Disposition Action */}
+                    <View style={styles.callCardFooter}>
+                      {item.outcome ? (
+                        <Pressable
+                          style={({ pressed }) => [styles.outcomeChip, pressed && { opacity: 0.7 }]}
+                          onPress={() => setActiveDispositionCall(item)}
+                        >
+                          <Text style={styles.outcomeChipText}>✓ {item.outcome}</Text>
+                          <Text style={styles.outcomeChipEdit}>Edit</Text>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          style={({ pressed }) => [styles.logOutcomeBtn, pressed && { opacity: 0.7 }]}
+                          onPress={() => setActiveDispositionCall(item)}
+                        >
+                          <Text style={styles.logOutcomeBtnText}>+ Tag Call Outcome</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  </View>
+                );
+              })
+            )}
+          </>
+        ) : (
+          /* Imports Tab Content */
+          <View style={styles.importsContainer}>
+            <View style={styles.feedHeaderRow}>
+              <Text style={styles.sectionHeaderTitle}>
+                {importsListName} ({importsList.length})
+              </Text>
+              <Pressable onPress={fetchImports} disabled={loadingImports}>
+                <Text style={styles.refreshLink}>{loadingImports ? 'Loading...' : '🔄 Refresh List'}</Text>
+              </Pressable>
+            </View>
+
+            {loadingImports ? (
+              <ActivityIndicator color="#4F46E5" style={{ marginVertical: 30 }} />
+            ) : importsList.length === 0 ? (
+              <View style={styles.emptyFeedCard}>
+                <Text style={styles.emptyFeedTitle}>No imports found</Text>
+              </View>
+            ) : (
+              importsList.map((student) => (
+                <View key={student.id} style={styles.callCard}>
+                  <View style={styles.callCardHeader}>
+                    <View style={styles.callCardLeft}>
+                      <View style={[styles.typeBadge, { backgroundColor: '#F3E8FF' }]}>
+                        <Text style={[styles.typeBadgeText, { color: '#7E22CE' }]}>
+                          👤 Student
+                        </Text>
+                      </View>
+                      <Pressable
+                        style={({ pressed }) => [
+                          styles.dialPressable,
+                          pressed && { opacity: 0.6 },
+                          !student.phone && { opacity: 0.4 }
+                        ]}
+                        disabled={!student.phone}
+                        onPress={() => {
+                          if (student.phone) {
+                            handleDial(student.phone);
+                            // Optimistic status update simulation
+                            setImportsList(prev => prev.map(p => p.id === student.id ? { ...p, status: 'Calling...' } : p));
+                          }
+                        }}
+                      >
+                        <Text style={styles.callNumber}>{student.phone || 'No Phone'}</Text>
+                        {student.phone ? <Text style={styles.dialIcon}>📞</Text> : null}
+                      </Pressable>
+                    </View>
+                    <Text style={[
+                      styles.callTime,
+                      { fontWeight: 'bold', color: student.status === 'Not called' ? '#64748B' : student.status === 'Calling...' ? '#2563EB' : '#DC2626'}
+                    ]}>
+                      {student.status}
                     </Text>
                   </View>
-                </View>
 
-                {/* Post-Call Disposition Action */}
-                <View style={styles.callCardFooter}>
-                  {item.outcome ? (
-                    <Pressable
-                      style={({ pressed }) => [styles.outcomeChip, pressed && { opacity: 0.7 }]}
-                      onPress={() => setActiveDispositionCall(item)}
-                    >
-                      <Text style={styles.outcomeChipText}>✓ {item.outcome}</Text>
-                      <Text style={styles.outcomeChipEdit}>Edit</Text>
-                    </Pressable>
-                  ) : (
-                    <Pressable
-                      style={({ pressed }) => [styles.logOutcomeBtn, pressed && { opacity: 0.7 }]}
-                      onPress={() => setActiveDispositionCall(item)}
-                    >
-                      <Text style={styles.logOutcomeBtnText}>+ Tag Call Outcome</Text>
-                    </Pressable>
-                  )}
+                  <View style={styles.callCardBody}>
+                    <Text style={[styles.callMeta, { color: '#1E293B', fontWeight: 'bold' }]}>
+                      {student.name}
+                    </Text>
+                    <Text style={styles.simHint}>{student.email}</Text>
+                  </View>
                 </View>
-              </View>
-            );
-          })
+              ))
+            )}
+          </View>
         )}
       </ScrollView>
 
@@ -2335,6 +2530,19 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0F172A',
   },
+  dialPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  dialIcon: {
+    fontSize: 14,
+    marginLeft: 6,
+  },
   callTime: {
     fontSize: 11,
     color: '#94A3B8',
@@ -2560,6 +2768,41 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginBottom: 4,
+  },
+
+  // Navigation Tabs
+  topNavContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#E2E8F0',
+    borderRadius: 8,
+    padding: 4,
+    marginHorizontal: 16,
+    marginBottom: 16,
+  },
+  topNavTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderRadius: 6,
+  },
+  topNavTabActive: {
+    backgroundColor: '#FFFFFF',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+  },
+  topNavText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  topNavTextActive: {
+    color: '#4F46E5',
+  },
+  importsContainer: {
+    paddingHorizontal: 0,
+    paddingBottom: 24,
   },
 });
 
