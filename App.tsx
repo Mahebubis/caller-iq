@@ -961,72 +961,77 @@ const App = (): React.JSX.Element => {
       .catch((err) => addLog(`Dialer error: ${err.message || err}`));
   };
 
-  // Fetch Live Imports from the API
+  /*
+   * The calling list, read from the panel.
+   *
+   * The phone cannot log in, so it identifies itself with the shared app key plus its device id
+   * (see CALLER_IQ_APP_KEY / ciq_app_device in the panel). The panel lets that read the list and
+   * nothing else. The endpoint follows whatever the sync endpoint is set to, so pointing the app
+   * at a different server moves this with it.
+   */
   const fetchImports = async () => {
     setLoadingImports(true);
     try {
       let deviceId = '';
-      if (CallBridge?.getSetupState) {
-          try {
-              const st = await CallBridge.getSetupState();
-              deviceId = st?.deviceId || '';
-          } catch (_) {}
-      }
-
-      // 1. Get the list of all imports
-      const listResponse = await fetch('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/imports.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ action: 'list', device_id: deviceId }),
-      });
-
-      // If the backend returns 401/403, we need to handle that gracefully
-      if (!listResponse.ok) {
-        throw new Error(`HTTP Error ${listResponse.status}`);
-      }
-
-      const listData = await listResponse.json();
-
-      if (listData.status === 'success' && listData.data?.imports?.length > 0) {
-        // 2. Grab the first/latest import ID
-        const latestImport = listData.data.imports[0];
-        const latestImportId = latestImport.id;
-        setImportsListName(latestImport.name || 'IMPORTED SEGMENT');
-
-        // 3. Fetch the rows/details for that specific import
-        const detailResponse = await fetch('https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/imports.php', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({ action: 'detail', id: latestImportId, device_id: deviceId }),
-        });
-        const detailData = await detailResponse.json();
-
-        if (detailData.status === 'success' && detailData.data?.rows) {
-          // 4. Map the API rows to our UI format
-          const mappedStudents = detailData.data.rows.map((row: any) => {
-            let callStatus = 'Not called';
-            if (row.connected > 0) callStatus = 'Connected';
-            else if (row.total > 0) callStatus = 'Not connected';
-            else if (row.called_by) callStatus = 'Called (marked)';
-
-            return {
-              id: row.id || row.row_no,
-              name: row.name || 'Unknown',
-              email: row.email || '',
-              phone: row.phone_norm || row.phone_raw || '',
-              status: callStatus,
-            };
-          });
-          setImportsList(mappedStudents);
-        } else {
-          setImportsList([]);
+      let appKey = '';
+      let url = (syncEndpoint || '').replace('log_call.php', 'imports.php');
+      try {
+        const st = await CallBridge?.getSetupState?.();
+        if (st) {
+          deviceId = st.deviceId || '';
+          appKey = st.appKey || '';
+          if (st.importsUrl) url = st.importsUrl;
         }
-      } else {
-        setImportsList([]); // No imports found
+      } catch (_) {}
+
+      const ask = async (body: any) => {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CallIQ-App-Key': appKey },
+          body: JSON.stringify({ ...body, device_id: deviceId, app_key: appKey }),
+        });
+        const text = await res.text();
+        let json: any = null;
+        try { json = JSON.parse(text); } catch (_) {}
+        if (!res.ok || !json) {
+          // The panel's own words where it sent any, so the cause is visible on the phone.
+          throw new Error(json?.message || `HTTP ${res.status}${text ? ' — ' + text.slice(0, 120) : ''}`);
+        }
+        if (!json.success) throw new Error(json.message || 'The panel refused the request');
+        return json.data || {};
+      };
+
+      const list = await ask({ action: 'list' });
+      const imports = list.imports || [];
+      if (!imports.length) {
+        setImportsList([]);
+        setImportsListName('NO LIST YET');
+        return;
       }
-    } catch (error) {
-      addLog(`Imports API Error: ${error}`);
-      Alert.alert('Error', 'Could not load imports. Check if the API requires a JWT token or is blocking the request.');
+
+      const latest = imports[0];
+      setImportsListName(latest.name || 'IMPORTED SEGMENT');
+
+      const detail = await ask({ action: 'detail', id: latest.id, page: 1, per_page: 200 });
+      const rows = detail.rows || [];
+      setImportsList(rows.map((row: any) => {
+        let callStatus = 'Not called';
+        if (row.connected > 0) callStatus = 'Connected';
+        else if (row.total > 0) callStatus = 'Not connected';
+        else if (row.called_by) callStatus = 'Called (marked)';
+        return {
+          id: row.id || row.row_no,
+          name: row.name || 'Unknown',
+          email: row.email || '',
+          phone: row.phone_norm || row.phone_raw || '',
+          status: callStatus,
+        };
+      }));
+      addLog(`Imports: ${rows.length} people in "${latest.name || 'list'}".`);
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      addLog(`Imports API error: ${msg}`);
+      Alert.alert('Could not load the list', msg);
     } finally {
       setLoadingImports(false);
     }

@@ -15,6 +15,18 @@ object CallIqConfig {
     const val PREFS = "call_tracker_prefs"
     const val DEFAULT_ENDPOINT = "https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/log_call.php"
 
+    /*
+     * Sent when the app READS company data from the panel (its calling list). The phone cannot log
+     * in, so the panel accepts this key together with a device_id it already knows, and only for
+     * read-only actions. It lives inside the APK, so it is a lock on the door, not a secret —
+     * must match CALLER_IQ_APP_KEY in react-api/api/caller-iq/ciq_lib.php.
+     */
+    const val APP_KEY = "ciq_app_8f54beef49f064d2034ed5b47713c2f9996118ed9aa315aa"
+
+    /** The panel endpoints all sit beside the call-log one, wherever that has been pointed. */
+    fun siblingEndpoint(context: Context, file: String): String =
+        endpoint(context).replace("log_call.php", file)
+
     /** The first build's default. Installs still holding it are moved to the live endpoint. */
     private const val LEGACY_ENDPOINT = "https://adp.internshipstudio.com/api/log_call.php"
 

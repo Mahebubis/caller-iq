@@ -252,6 +252,10 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 putString("checkinError", DeviceCheckin.lastError(ctx))
                 putBoolean("monitorEnabled", CallIqConfig.monitorEnabled(ctx))
                 putBoolean("monitorRunning", CallMonitorService.isRunning)
+                // What the app screen needs to read its calling list from the panel.
+                putString("deviceId", CallIqConfig.deviceId(ctx))
+                putString("appKey", CallIqConfig.APP_KEY)
+                putString("importsUrl", CallIqConfig.siblingEndpoint(ctx, "imports.php"))
             })
         } catch (e: Throwable) {
             promise.reject("setup_state_failed", e)
