@@ -19,5 +19,8 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
+# Kotlin compiler scratch + crash logs (a failed build committed one of these)
+.kotlin/
+
 # App builds
 app/build/
