@@ -58,6 +58,8 @@ class CallSyncWorker(
                 put("idempotency_key", idempotencyKey)
                 if (outcome.isNotEmpty()) {
                     put("outcome", outcome)
+                    // Tagged just now, so whoever is picked as "Called by" is who made the call.
+                    CallIqConfig.calledBy(applicationContext).takeIf { it.isNotEmpty() }?.let { put("called_by", it) }
                 }
                 // Lets the admin panel tell phones apart (Caller IQ → Agents).
                 put("device_id", CallIqConfig.deviceId(applicationContext))

@@ -196,22 +196,6 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    /** Opens the OEM screen that owns one of the switches the popup depends on. */
-    @ReactMethod
-    fun openOemSetting(kind: String, promise: Promise) {
-        try {
-            val ok = when (kind) {
-                "popup" -> OemSettings.openBackgroundPopupSettings(reactApplicationContext)
-                "autostart" -> OemSettings.openAutostartSettings(reactApplicationContext)
-                "notifications" -> OemSettings.openNotificationSettings(reactApplicationContext)
-                else -> false
-            }
-            promise.resolve(ok)
-        } catch (e: Throwable) {
-            promise.resolve(false)
-        }
-    }
-
     /* ── One-tap setup ────────────────────────────────────────────────────── */
 
     /**
@@ -390,6 +374,74 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /* ── Calling and callback reminders ───────────────────────────────────── */
+
+    /** Dials straight away with the Phone permission ("call"); without it, opens the dialer pre-filled ("dialer"). */
+    @ReactMethod
+    fun placeCall(number: String, promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            val canCall = ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+            val intent = Intent(if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL, Uri.parse("tel:$number"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(intent)
+            promise.resolve(if (canCall) "call" else "dialer")
+        } catch (e: Throwable) {
+            promise.reject("dial_failed", e)
+        }
+    }
+
+    /**
+     * Arms a reminder at [atMs]; the same id again replaces it. Resolves "exact", "inexact" (the
+     * phone does not allow exact alarms for CallIQ) or "fired" (the time had already passed, so it
+     * was shown at once).
+     */
+    @ReactMethod
+    fun scheduleCallbackReminder(id: String, atMs: Double, title: String, body: String, number: String, promise: Promise) {
+        try {
+            promise.resolve(CallbackReminders.schedule(reactApplicationContext, id, atMs.toLong(), title, body, number))
+        } catch (e: Throwable) {
+            promise.reject("reminder_failed", e)
+        }
+    }
+
+    @ReactMethod
+    fun cancelCallbackReminder(id: String, promise: Promise) {
+        try {
+            CallbackReminders.cancel(reactApplicationContext, id)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.reject("reminder_cancel_failed", e)
+        }
+    }
+
+    /** One notification sound and a short buzz, for alerts raised inside the app. */
+    @ReactMethod
+    fun playAlert(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            android.media.RingtoneManager.getRingtone(
+                ctx, android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
+            )?.play()
+            val pattern = longArrayOf(0, 250, 150, 250)
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION") ctx.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+            }
+            if (vibrator?.hasVibrator() == true) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1))
+                } else {
+                    @Suppress("DEPRECATION") vibrator.vibrate(pattern, -1)
+                }
+            }
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
     /* ── SIM balance over USSD ────────────────────────────────────────────── */
 
     /** The codes, the switch, and what the operator last said — the SIM balance screen. */
@@ -528,8 +580,20 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         getRecentCallLogs(50, promise)
     }
 
+    /*
+     * Reading hundreds of calls (each matched to its SIM) takes seconds on a slow phone. React
+     * Native runs every CallBridge method on one shared thread, so doing it there held up every
+     * other call behind it — the saved calling lists, the build note, settings — and the first
+     * screen stayed empty. It runs on its own thread instead; one read at a time.
+     */
+    private val callLogReader = java.util.concurrent.Executors.newSingleThreadExecutor()
+
     @ReactMethod
     fun getRecentCallLogs(limit: Int, promise: Promise) {
+        callLogReader.execute { readCallLogs(limit, promise) }
+    }
+
+    private fun readCallLogs(limit: Int, promise: Promise) {
         try {
             val readCallLog = ContextCompat.checkSelfPermission(
                 reactApplicationContext,
@@ -624,36 +688,6 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun isBatteryOptimizationIgnored(promise: Promise) {
-        try {
-            val pm = reactApplicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
-            val isIgnored = pm?.isIgnoringBatteryOptimizations(reactApplicationContext.packageName) ?: false
-            promise.resolve(isIgnored)
-        } catch (e: Throwable) {
-            promise.resolve(true)
-        }
-    }
-
-    @ReactMethod
-    fun requestIgnoreBatteryOptimizations(promise: Promise) {
-        try {
-            val pm = reactApplicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
-            val isIgnored = pm?.isIgnoringBatteryOptimizations(reactApplicationContext.packageName) ?: false
-
-            if (!isIgnored) {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:${reactApplicationContext.packageName}")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                reactApplicationContext.startActivity(intent)
-            }
-            promise.resolve(true)
-        } catch (e: Throwable) {
-            promise.resolve(false)
-        }
-    }
-
-    @ReactMethod
     fun getPendingQueueCount(promise: Promise) {
         try {
             val workManager = WorkManager.getInstance(reactApplicationContext)
@@ -733,5 +767,82 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
             promise.resolve("{}")
         }
     }
+
+    /** "Called by": the names offered, and who is picked now — shared with the post-call popup. */
+    @ReactMethod
+    fun getCalledBy(promise: Promise) {
+        try {
+            val names = Arguments.createArray()
+            CallIqConfig.CALLERS.forEach { names.pushString(it) }
+            promise.resolve(Arguments.createMap().apply {
+                putArray("names", names)
+                putString("current", CallIqConfig.calledBy(reactApplicationContext))
+            })
+        } catch (e: Throwable) {
+            promise.resolve(null)
+        }
+    }
+
+    @ReactMethod
+    fun setCalledBy(name: String, promise: Promise) {
+        try {
+            CallIqConfig.setCalledBy(reactApplicationContext, name)
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    /*
+     * A small key → JSON store for the app screen (the calling lists it last read), so reopening
+     * the app shows them at once instead of an empty screen while the panel answers. Kept in its
+     * own prefs file so it can never collide with the tracker's settings.
+     */
+    @ReactMethod
+    fun saveUiCache(key: String, json: String, promise: Promise) {
+        try {
+            reactApplicationContext.getSharedPreferences("calliq_ui_cache", Context.MODE_PRIVATE)
+                .edit().putString(key, json).apply()
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun loadUiCache(key: String, promise: Promise) {
+        try {
+            promise.resolve(
+                reactApplicationContext.getSharedPreferences("calliq_ui_cache", Context.MODE_PRIVATE).getString(key, "") ?: ""
+            )
+        } catch (e: Throwable) {
+            promise.resolve("")
+        }
+    }
+
+    /*
+     * The app's light/dark theme reaches the parts React Native cannot draw: the window behind the
+     * status and navigation bars (the app is edge to edge, see MainActivity) and the colour of the
+     * icons on them. Called whenever the theme changes, including a choice made in Settings.
+     */
+    @ReactMethod
+    fun setSystemBarsTheme(dark: Boolean, colorHex: String) {
+        val activity = currentActivity ?: return
+        activity.runOnUiThread {
+            try {
+                val color = android.graphics.Color.parseColor(colorHex)
+                val window = activity.window
+                window.decorView.setBackgroundColor(color)
+                @Suppress("DEPRECATION")
+                if (Build.VERSION.SDK_INT < 35) {
+                    window.statusBarColor = color
+                    window.navigationBarColor = color
+                }
+                androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            } catch (_: Throwable) {}
+        }
+    }
 }
-//changed

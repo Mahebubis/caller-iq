@@ -24,3 +24,7 @@ yarn-error.log
 
 # App builds
 app/build/
+
+# JVM crash dumps
+hs_err_pid*.log
+replay_pid*.log

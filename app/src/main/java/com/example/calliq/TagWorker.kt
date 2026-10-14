@@ -37,6 +37,7 @@ class TagWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker
             put("tagged_via", inputData.getString("via") ?: "popup")
             inputData.getString("number")?.takeIf { it.isNotEmpty() }?.let { put("number", it) }
             inputData.getString("idempotency_key")?.takeIf { it.isNotEmpty() }?.let { put("idempotency_key", it) }
+            inputData.getString("called_by")?.takeIf { it.isNotEmpty() }?.let { put("called_by", it) }
         }.toString()
 
         try {
@@ -77,6 +78,8 @@ class TagWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker
                     "started_ms" to startedMs,
                     "idempotency_key" to idempotencyKey,
                     "via" to via,
+                    // Who was on the phone when the call was tagged (picked on the popup).
+                    "called_by" to CallIqConfig.calledBy(context),
                 ))
                 .addTag("CallSyncWorker")   // counts towards the app's "pending queue" figure
                 .build()

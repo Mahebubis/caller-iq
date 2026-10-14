@@ -28,7 +28,7 @@ object CallPopupView {
     val INK = Color.parseColor("#0F172A")
     val MUTE = Color.parseColor("#64748B")
     val LINE = Color.parseColor("#E2E8F0")
-    val ACCENT = Color.parseColor("#4F46E5")
+    val ACCENT = Color.parseColor("#4F46E5")   // the app's brand indigo (src/theme.ts `primary`)
 
     fun Context.dp(value: Number): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()
@@ -76,6 +76,17 @@ object CallPopupView {
         call.number.ifEmpty { if (call.callType.startsWith("OUTGOING")) "Outgoing call" else "Call just ended" }
 
     class Card(val root: View, val title: TextView, val meta: TextView)
+
+    private fun sectionLabel(ctx: Context, label: String) = TextView(ctx).apply {
+        text = label
+        setTextColor(Color.parseColor("#94A3B8"))
+        textSize = 11f
+        letterSpacing = 0.06f
+        typeface = Typeface.DEFAULT_BOLD
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = ctx.dp(12); bottomMargin = ctx.dp(8) }
+    }
 
     /**
      * Builds the card. [onTag] receives the chosen outcome; [onClose] and [onOpenApp] are the
@@ -142,6 +153,47 @@ object CallPopupView {
             setOnClickListener { onClose() }
         })
         card.addView(header)
+
+        /* Called by — a shared phone, so the tag says who made the call. Remembered between calls. */
+        card.addView(sectionLabel(ctx, "Called by"))
+        val callerRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val callerChips = mutableListOf<TextView>()
+        fun paintCallers() {
+            val picked = CallIqConfig.calledBy(ctx)
+            callerChips.forEach { chip ->
+                val on = chip.text.toString() == picked
+                chip.setTextColor(if (on) Color.WHITE else INK)
+                chip.background = if (on) rounded(ACCENT, ctx.dp(18).toFloat())
+                                  else rounded(Color.WHITE, ctx.dp(18).toFloat(), ctx.dp(1), LINE)
+            }
+        }
+        CallIqConfig.CALLERS.forEach { name ->
+            val chip = TextView(ctx).apply {
+                text = name
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setPadding(ctx.dp(6), ctx.dp(8), ctx.dp(6), ctx.dp(8))
+                isClickable = true
+                setOnClickListener {
+                    // Tapping the picked name again clears it.
+                    CallIqConfig.setCalledBy(ctx, if (CallIqConfig.calledBy(ctx) == name) "" else name)
+                    paintCallers()
+                }
+            }
+            callerChips += chip
+            callerRow.addView(chip, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(ctx.dp(3), 0, ctx.dp(3), 0)
+            })
+        }
+        paintCallers()
+        card.addView(callerRow)
 
         card.addView(TextView(ctx).apply {
             text = "Tag this call"

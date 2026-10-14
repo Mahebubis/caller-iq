@@ -15,7 +15,11 @@ class BootReceiver : BroadcastReceiver() {
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,
-            "android.intent.action.QUICKBOOT_POWERON" -> CallMonitorService.start(context.applicationContext)
+            "android.intent.action.QUICKBOOT_POWERON" -> {
+                CallMonitorService.start(context.applicationContext)
+                // Alarms do not survive a reboot; callback reminders are armed again from prefs.
+                CallbackReminders.rearmAll(context.applicationContext)
+            }
         }
     }
 }

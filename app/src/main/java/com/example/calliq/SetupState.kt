@@ -79,6 +79,9 @@ object SetupState {
         val all = mutableListOf(Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) all += Manifest.permission.READ_PHONE_NUMBERS
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) all += Manifest.permission.POST_NOTIFICATIONS
+        // Lets "Call" in the app (and "Call now" on a callback reminder) dial straight away instead of
+        // stopping at the dialer.
+        all += Manifest.permission.CALL_PHONE
         return all.filter { !granted(ctx, it) }
     }
 

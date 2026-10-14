@@ -36,16 +36,26 @@ object CallIqConfig {
     const val KEY_POPUP_TIMEOUT = "POPUP_TIMEOUT_SEC"
     const val KEY_LAST_POPUP_KEY = "LAST_POPUP_KEY"
 
-    /** The one-tap outcomes offered on the popup — the same seven the app's own dialog shows. */
+    /** The one-tap outcomes offered on the popup — the same four the app's own tag sheet shows. */
     val DISPOSITIONS: List<Pair<String, String>> = listOf(
         "Interested" to "#059669",
-        "Enrolled" to "#7C3AED",
         "Callback Scheduled" to "#D97706",
         "Resolved" to "#0891B2",
-        "Not Answering" to "#DC2626",
-        "Course Query" to "#4F46E5",
-        "Escalated to Tech" to "#DB2777",
+        "Query" to "#2563EB",
     )
+
+    /**
+     * Who is on the phone: one handset is often shared, so every tag says who made the call.
+     * The choice is remembered until someone else picks their name.
+     */
+    val CALLERS: List<String> = listOf("Samiya", "Karan Sir", "Priyanka Mam")
+    private const val KEY_CALLED_BY = "CALLED_BY"
+
+    fun calledBy(context: Context): String = prefs(context).getString(KEY_CALLED_BY, "") ?: ""
+
+    fun setCalledBy(context: Context, name: String) {
+        prefs(context).edit().putString(KEY_CALLED_BY, name).apply()
+    }
 
     fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -92,7 +102,4 @@ object CallIqConfig {
     fun popupEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_ENABLED, true)
     fun popupForMissed(context: Context): Boolean = prefs(context).getBoolean(KEY_POPUP_MISSED, true)
     fun popupTimeoutSec(context: Context): Int = prefs(context).getInt(KEY_POPUP_TIMEOUT, 45).coerceIn(10, 300)
-
-    /** Kept so older callers still compile; SIM logic lives in [SimResolver]. */
-    fun resolveSim(context: Context, rawSimId: String): SimResolver.Sim = SimResolver.resolve(context, rawSimId)
 }

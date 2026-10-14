@@ -110,9 +110,6 @@ object CallLogHelper {
 
                     val idempotencyKey = "${number}_${date}"
 
-                    Log.d("CallLogHelper", "Call: number=$number type=$callTypeStr dur=$duration " +
-                        "account=$rawSimId → ${sim.display} (via ${sim.source}) date=$date")
-
                     CallSyncWorker.schedule(
                         context = context,
                         number = number,
