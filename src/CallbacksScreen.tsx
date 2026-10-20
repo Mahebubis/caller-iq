@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, FlatList, NativeModules, Pressable, RefreshControl, Text, View } from 'react-native';
-import { makeStyles, radius, space, type, useTheme } from './theme';
+import { ActivityIndicator, Alert, AppState, FlatList, NativeModules, Pressable, RefreshControl, Text, View } from 'react-native';
+import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
 import { errorKind, panelAsk, panelDevice } from './api';
 import { ago, callbackTime, dueIn, last10, num, plural, prettyPhone, serverTime } from './format';
 import {
@@ -9,6 +9,10 @@ import {
 } from './ui';
 import { MAX_ATTEMPTS, ScheduleTarget, SmsTarget } from './types';
 import type { ImportList, Show } from './ImportsScreen';
+import { useWaSend } from './whatsapp';
+import type { FocusTarget } from './sheets/FocusSheet';
+import { useMessaged } from './messaged';
+import { Avatar } from './art';
 
 const { CallBridge } = NativeModules;
 
@@ -49,6 +53,10 @@ export interface Owed {
   mine?: boolean;       // that time was set on this phone, so this phone rings for it
   smsAt?: number;       // the last quick SMS sent to them
   smsCount?: number;
+  waAt?: number;        // the last WhatsApp sent to them
+  waCount?: number;
+  heat?: number;        // lead heat score 0-100 (crm.php)
+  dnd?: boolean;        // opted out of WhatsApp
   reason: Reason;
   since: number;        // when it became owed
   lastAt: number;       // newest event for the number
@@ -83,6 +91,7 @@ interface Props {
   onItems?: (items: Owed[]) => void;
   onSchedule: (t: ScheduleTarget) => void;
   onSms: (t: SmsTarget) => void;
+  onFocus?: (t: FocusTarget) => void;
   /** Bumped when a callback time was set or cleared, so the team's list is read again. */
   reloadSignal: number;
 }
@@ -141,7 +150,7 @@ const REASON_LABEL: { [k in Reason]: string } = {
 };
 const IMPORTED_LABEL: { [k: string]: string } = { needs_callback: 'Needs callback', missed_call: 'Missed call', pending_followup: 'Follow-up' };
 
-const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenList, onCount, onItems, onSchedule, onSms, reloadSignal }: Props) => {
+const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenList, onCount, onItems, onSchedule, onSms, onFocus, reloadSignal }: Props) => {
   const t = useTheme();
   const s = useStyles();
   const [scope, setScope] = useState<'team' | 'phone'>('team');
@@ -188,6 +197,10 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
           mine: !!x.sched_device && x.sched_device === panelDevice(),
           smsAt: serverTime(x.sms_at) || undefined,
           smsCount: Number(x.sms_count) || 0,
+          waAt: serverTime(x.wa_at) || undefined,
+          waCount: Number(x.wa_count) || 0,
+          heat: Number(x.heat) || 0,
+          dnd: !!Number(x.dnd),
           reason: (REASON_LABEL[x.reason as Reason] ? x.reason : 'missed') as Reason,
           since: serverTime(x.since_at),
           lastAt: serverTime(x.last_at),
@@ -251,6 +264,22 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
     return () => { clearInterval(iv); sub.remove(); timers.forEach(clearTimeout); };
   }, [active]);
 
+  /*
+   * What counts as a callback here: someone who missed us, asked to be called back, did not answer,
+   * or has a callback time. People who are only on an imported calling list are not callbacks (the
+   * Lists tab has them). And once they have been sent an SMS or a WhatsApp after that, they are
+   * handled — gone from here — unless a callback time was set for them.
+   */
+  const messaged = useMessaged();
+  const wa = useWaSend();
+  const isOpen = useCallback((o: Owed) => {
+    if (o.reason === 'imported') return false;
+    if (done[o.key] >= o.lastAt) return false;
+    if (o.dueAt || o.reason === 'scheduled') return true;
+    const msg = Math.max(o.smsAt || 0, o.waAt || 0, messaged(o.number), wa.sentAt(o.number));
+    return !(msg && msg >= o.lastAt);
+  }, [done, messaged, wa]);
+
   const phoneItems = useMemo(() => pendingCallbacks(calls), [calls]);
   const teamItems = team && team.since === since ? team.items : null;
 
@@ -259,7 +288,7 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
     const q = query.trim().toLowerCase();
     const qd = q.replace(/\D/g, '');
     const out = items.filter((o) => {
-      if (done[o.key] >= o.lastAt) return false;
+      if (!isOpen(o)) return false;
       if (!q) return true;
       return (qd.length >= 3 && o.key.includes(qd))
         || (o.name || '').toLowerCase().includes(q)
@@ -268,15 +297,15 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
     });
     // Callback times lead, soonest (or most overdue) first.
     return out.sort((a, b) => (a.dueAt ? 0 : 1) - (b.dueAt ? 0 : 1) || (a.dueAt || 0) - (b.dueAt || 0));
-  }, [scope, teamItems, phoneItems, query, done]);
+  }, [scope, teamItems, phoneItems, query, isOpen]);
 
   // Badge and live feed: the team's 30-day list when the panel has answered, else this phone's.
   useEffect(() => {
     const tm = team && team.since === '30' ? team.items : null;
-    const owed = (tm || phoneItems).filter((o) => !(done[o.key] >= o.lastAt));
+    const owed = (tm || phoneItems).filter(isOpen);
     onCount?.(owed.length);
     onItems?.(owed);
-  }, [team, phoneItems, done]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [team, phoneItems, isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hide = useCallback((o: Owed) => {
     setDone((d) => {
@@ -296,8 +325,8 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
   };
 
   const renderItem = useCallback(({ item, index }: { item: Owed; index: number }) => (
-    <OwedCard o={item} index={index} onDial={onDial} onHide={hide} onSchedule={onSchedule} onSms={onSms} />
-  ), [onDial, hide, onSchedule, onSms]);
+    <OwedCard o={item} index={index} onDial={onDial} onHide={hide} onSchedule={onSchedule} onSms={onSms} onFocus={onFocus} />
+  ), [onDial, hide, onSchedule, onSms, onFocus]);
 
   const header = (
     <View>
@@ -321,7 +350,7 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
         </ChipBar>
       )}
 
-      <SearchField value={query} onChangeText={setQuery} placeholder={scope === 'team' ? 'Search number, name or agent' : 'Search number'} />
+      <SearchField value={query} onChangeText={setQuery} placeholder={scope === 'team' ? 'Search number or name' : 'Search number'} />
 
       {scope === 'team' && !!error && (
         <Banner
@@ -346,7 +375,7 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
       icon={query ? 'search' : 'task_alt'}
       tone={query ? 'primary' : 'success'}
       title={query ? `Nothing matches “${query}”` : 'You’re all caught up'}
-      body={query ? undefined : 'Missed calls nobody has returned, and calls tagged “Callback Scheduled” or “Not Answering”, show up here.'}
+      body={query ? undefined : 'Missed calls nobody has returned, calls tagged “Callback Scheduled” or “Not Answering”, and callback times show up here. Anyone you call back, SMS or WhatsApp drops off.'}
       actionLabel={query ? 'Clear search' : undefined}
       onAction={() => setQuery('')}
     />
@@ -383,7 +412,7 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
       renderItem={renderItem}
       ListHeaderComponent={header}
       ListEmptyComponent={empty}
-      ListFooterComponent={footer}
+      ListFooterComponent={null}
       contentContainerStyle={s.body}
       keyboardShouldPersistTaps="handled"
       initialNumToRender={10}
@@ -395,7 +424,8 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
   );
 };
 
-const OwedCard = memo(({ o, index, onDial, onHide, onSchedule, onSms }: {
+const OwedCard = memo(({ o, index, onDial, onHide, onSchedule, onSms, onFocus }: {
+  onFocus?: (t: FocusTarget) => void;
   o: Owed;
   index: number;
   onDial: (n: string) => void;
@@ -405,71 +435,43 @@ const OwedCard = memo(({ o, index, onDial, onHide, onSchedule, onSms }: {
 }) => {
   const t = useTheme();
   const s = useStyles();
+  const wa = useWaSend();
   const overdue = !!o.dueAt && o.dueAt <= Date.now();
-  const scheduled = o.reason === 'scheduled' || o.reason === 'callback' || (o.reason === 'imported' && o.importStatus === 'pending_followup');
+  const scheduled = !!o.dueAt || o.reason === 'scheduled' || o.reason === 'callback';
   const tone = overdue ? { fg: t.c.danger, bg: t.c.dangerSoft }
-    : scheduled ? { fg: t.c.blue, bg: t.c.blueSoft }
+    : scheduled ? { fg: t.c.warning, bg: t.c.warningSoft }
     : o.reason === 'no_answer' ? { fg: t.c.orange, bg: t.c.orangeSoft }
     : { fg: t.c.danger, bg: t.c.dangerSoft };
-  const label = o.dueAt ? (overdue ? `Due ${dueIn(o.dueAt)}` : callbackTime(o.dueAt))
-    : o.reason === 'imported' ? IMPORTED_LABEL[o.importStatus || ''] || REASON_LABEL.imported : REASON_LABEL[o.reason];
+  const label = o.dueAt ? (overdue ? `Due ${dueIn(o.dueAt)}` : callbackTime(o.dueAt)) : REASON_LABEL[o.reason];
   const number = o.key.length === 10 ? o.key : o.number;
+  const when = [ago(o.lastAt || o.since, 'earlier'), o.missed > 1 ? `missed ${o.missed}×` : '', o.tries ? `tried ${o.tries}×` : ''].filter(Boolean).join(' · ');
   return (
-    <View style={s.card}>
+    <Pressable
+      style={({ pressed }) => [s.card, pressed && { opacity: 0.95 }]}
+      onPress={onFocus ? () => onFocus({ number: o.number, name: o.name, segment: o.segment, attempts: o.tries, dueAt: o.dueAt, index: index + 1 }) : undefined}
+      onLongPress={() => Alert.alert('Hide this callback?', `${o.name || prettyPhone(number)} disappears from this phone’s list until they call or miss you again.`, [
+        { text: 'Cancel', style: 'cancel' }, { text: 'Hide', onPress: () => onHide(o) },
+      ])}
+      accessibilityRole="button"
+      accessibilityHint="Opens the workspace. Long-press to hide."
+    >
       <View style={s.row}>
-        <View style={[s.reasonIcon, { backgroundColor: tone.bg }]}><Icon name={REASON_ICON[o.reason]} size={20} color={tone.fg} /></View>
+        <Avatar name={o.name} phone={number} size={44} />
         <View style={{ flex: 1 }}>
-          <View style={s.numberRow}>
-            <IndexBadge n={index + 1} />
-            <Text style={s.number} selectable>{prettyPhone(number)}</Text>
-          </View>
-          {!!o.name && <Text style={s.name} numberOfLines={1}>{o.name}</Text>}
-          <Text style={s.meta}>
-            {o.reason === 'imported' ? `added ${ago(o.since, 'earlier')}` : ago(o.since, 'earlier')}
-            {o.missed > 1 ? ` · missed ${o.missed}×` : ''}
-            {o.tries ? ` · tried ${o.tries}× since` : ''}
-          </Text>
+          <Text style={s.name} numberOfLines={1}>{o.name || prettyPhone(number)}</Text>
+          <Text style={s.meta} numberOfLines={1}>{o.name ? `${prettyPhone(number)} · ` : ''}{when}</Text>
         </View>
         <Pill label={label} fg={tone.fg} bg={tone.bg} dot pulse={overdue} />
       </View>
       {!!o.note && <Text style={s.note} numberOfLines={2}>“{o.note}”</Text>}
-      <View style={s.agentRow}>
-        <AttemptBadge n={o.tries} max={MAX_ATTEMPTS} />
-        {!!o.smsAt && <Pill label={`SMS ${ago(o.smsAt)}${(o.smsCount || 0) > 1 ? ` · ${o.smsCount}×` : ''}`} icon="sms" fg={t.c.violet} bg={t.c.violetSoft} />}
-      </View>
-      {!!o.segment && (
-        <View style={s.agentRow}>
-          <Icon name="sell" size={14} color={t.c.faint} />
-          <Text style={s.agent} numberOfLines={1}>{o.segment}</Text>
-        </View>
-      )}
-      {!!o.agent && (
-        <View style={s.agentRow}>
-          <Icon name="smartphone" size={14} color={t.c.faint} />
-          <Text style={s.agent} numberOfLines={1}>Owed on {o.agent}</Text>
-        </View>
-      )}
       <View style={s.actions}>
-        <IconButton icon="visibility_off" label={`Hide ${prettyPhone(number)} on this phone`} size={36} onPress={() => onHide(o)} />
-        {/* Rang back with no answer (or they missed us): a text is the next best thing. */}
-        <IconButton
-          icon="sms"
-          label={`Send a quick SMS to ${prettyPhone(number)}`}
-          size={36}
-          tone={o.tries > 0 || o.reason === 'no_answer' ? 'soft' : 'outlined'}
-          onPress={() => onSms({ number, name: o.name, segment: o.segment })}
-        />
-        <Button
-          label={o.dueAt ? 'Reschedule' : 'Schedule'}
-          icon="alarm"
-          variant="secondary"
-          size="sm"
-          onPress={() => onSchedule({ number, name: o.name, segment: o.segment, dueAt: o.dueAt, note: o.note })}
-          accessibilityLabel={`Schedule a callback for ${prettyPhone(number)}`}
-        />
+        <IconButton icon="chat" label={`WhatsApp ${prettyPhone(number)}`} size={38} tone="soft" color="#16A34A" disabled={!!o.dnd} onPress={() => wa.openSend({ name: o.name, phone: number, segment: o.segment })} />
+        <IconButton icon="sms" label={`SMS ${prettyPhone(number)}`} size={38} tone="soft" color={t.c.violet} onPress={() => onSms({ number, name: o.name, segment: o.segment })} />
+        <IconButton icon="alarm" label={`${o.dueAt ? 'Reschedule' : 'Schedule'} the callback`} size={38} tone="soft" color={t.c.warning} onPress={() => onSchedule({ number, name: o.name, segment: o.segment, dueAt: o.dueAt, note: o.note })} />
+        <View style={{ flex: 1 }} />
         <Button label="Call back" icon="call" size="sm" variant="success" pill onPress={() => onDial(number)} accessibilityLabel={`Call back ${prettyPhone(number)}`} />
       </View>
-    </View>
+    </Pressable>
   );
 });
 
@@ -483,18 +485,17 @@ const useStyles = makeStyles((t) => ({
   count: { ...type.overline, color: t.c.muted, marginBottom: space.md, marginTop: space.xs },
 
   card: {
-    backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: t.c.border,
-    padding: 14, marginBottom: 10, overflow: 'hidden',
+    backgroundColor: t.c.surface, borderRadius: radius.xl, padding: 14, marginBottom: 10, ...elevation(t),
   },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   reasonIcon: { width: 40, height: 40, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
   numberRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   number: { fontSize: 15.5, fontWeight: '600', color: t.c.text, letterSpacing: 0.2 },
-  name: { fontSize: 13, color: t.c.link, fontWeight: '600', marginTop: 2 },
+  name: { fontSize: 15.5, color: t.c.text, fontWeight: '700' },
   listName: { fontSize: 15, fontWeight: '600', color: t.c.text },
   meta: { fontSize: 12, color: t.c.muted, marginTop: 3 },
   agentRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 8, marginLeft: 52 },
   agent: { fontSize: 12, color: t.c.muted },
-  note: { fontSize: 13, color: t.c.textSoft, fontStyle: 'italic', marginTop: 8, marginLeft: 52 },
-  actions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 },
+  note: { fontSize: 13, color: t.c.textSoft, fontStyle: 'italic', marginTop: 8, marginLeft: 56 },
+  actions: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12, marginLeft: 56 },
 }));

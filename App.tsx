@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, BackHandler, Linking, NativeModules, Text, useColorScheme, View } from 'react-native';
+import { Alert, AppState, BackHandler, Linking, NativeModules, Text, TextInput, useColorScheme, View } from 'react-native';
 import ImportsScreen, { ImportsHandle, ImportList, Show } from './src/ImportsScreen';
 import CallbacksScreen, { Owed } from './src/CallbacksScreen';
 import CallsScreen, { CallsHandle } from './src/CallsScreen';
@@ -10,9 +10,24 @@ import SimLabelsSheet from './src/sheets/SimLabelsSheet';
 import BuildNoteDialog from './src/sheets/BuildNoteDialog';
 import ScheduleSheet from './src/sheets/ScheduleSheet';
 import SmsSheet from './src/sheets/SmsSheet';
+import { useWaSend, WhatsAppBadge, WhatsAppProvider } from './src/whatsapp';
+import { EngageProvider, PointsBar, usePoints, useUndo } from './src/engage';
+import FocusSheet, { FocusTarget } from './src/sheets/FocusSheet';
+import SearchSheet from './src/sheets/SearchSheet';
+import MiniCallBar, { ActiveCall, Disposition } from './src/MiniCallBar';
+import StatsScreen from './src/StatsScreen';
+import { crm, native, setCrmEndpoint } from './src/crm';
+import { fillSales, TEMPLATES } from './src/sales';
+import { autosave } from './src/backup';
+import { markMessaged } from './src/messaged';
 import { panelAsk } from './src/api';
 import { callbackTime, last10, prettyPhone } from './src/format';
-import { darkTheme, lightTheme, makeStyles, radius, space, ThemeContext, ThemePref, useTheme } from './src/theme';
+import { AccentKey, elevation, FontSize, getTheme, glow, makeStyles, radius, space, ThemeContext, ThemePref, useTheme } from './src/theme';
+import { Gradient, Logo } from './src/art';
+import { HomeHero } from './src/HomeDash';
+import type { DialerInfo } from './src/ImportsScreen';
+import CallScreen from './src/CallScreen';
+import QuickCallSheet from './src/sheets/QuickCallSheet';
 import { Icon, IconButton, IconName, PulseDot, Tactile, ToastProvider, useToast } from './src/ui';
 import {
   BuildInfo, CallLogItem, PopupReadiness, ScheduleTarget, SetupInfo, SmsTarget, SetupStep, SimDiagnostics, SimNicknameMap, UssdSettings,
@@ -28,8 +43,19 @@ const DEFAULT_SIM_MAPPING: SimNicknameMap = {
 
 const DEFAULT_ENDPOINT = 'https://cit3.internshipstudio.com/admin/react-api/api/caller-iq/log_call.php';
 const THEME_KEY = 'theme_pref';
+const ACCENT_KEY = 'accent_pref';
+const SIZE_KEY = 'font_size_pref';
 
-type Tab = 'feed' | 'imports' | 'callbacks';
+export interface Appearance {
+  themePref: ThemePref;
+  onThemePref: (p: ThemePref) => void;
+  accent: AccentKey;
+  onAccent: (a: AccentKey) => void;
+  fontSize: FontSize;
+  onFontSize: (f: FontSize) => void;
+}
+
+type Tab = 'feed' | 'imports' | 'callbacks' | 'stats';
 
 /** Skips a state update (and the re-render of every tab) when a poll brought back the same thing. */
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
@@ -42,35 +68,41 @@ const withTimeout = <T,>(promise: Promise<T>, ms: number, fallback: T): Promise<
 const App = (): React.JSX.Element => {
   const scheme = useColorScheme();
   const [pref, setPref] = useState<ThemePref>('system');
+  const [accent, setAccent] = useState<AccentKey>('sunset');
+  const [size, setSize] = useState<FontSize>('medium');
 
   useEffect(() => {
     CallBridge?.loadUiCache?.(THEME_KEY).then((v: string) => {
       if (v === 'light' || v === 'dark' || v === 'system') setPref(v);
     }).catch(() => {});
+    CallBridge?.loadUiCache?.(ACCENT_KEY).then((v: string) => { if (v) setAccent(v as AccentKey); }).catch(() => {});
+    CallBridge?.loadUiCache?.(SIZE_KEY).then((v: string) => { if (v === 'small' || v === 'medium' || v === 'large') setSize(v); }).catch(() => {});
   }, []);
 
-  const theme = (pref === 'system' ? scheme === 'dark' : pref === 'dark') ? darkTheme : lightTheme;
+  const theme = getTheme(pref === 'system' ? scheme === 'dark' : pref === 'dark', accent, size);
 
-  // Status bar, navigation bar and the window behind them follow the theme too.
-  useEffect(() => {
-    CallBridge?.setSystemBarsTheme?.(theme.dark, theme.c.surface);
-  }, [theme]);
+  // Status bar, navigation bar and the window behind them follow the theme too — set by Main,
+  // which knows whether Home's plum hero is showing (child effects run first, so not here too).
 
   const changePref = useCallback((p: ThemePref) => {
     setPref(p);
     CallBridge?.saveUiCache?.(THEME_KEY, p);
   }, []);
+  const changeAccent = useCallback((a: AccentKey) => { setAccent(a); CallBridge?.saveUiCache?.(ACCENT_KEY, a); }, []);
+  const changeSize = useCallback((f: FontSize) => { setSize(f); CallBridge?.saveUiCache?.(SIZE_KEY, f); }, []);
+  const appearance = { themePref: pref, onThemePref: changePref, accent, onAccent: changeAccent, fontSize: size, onFontSize: changeSize };
 
   return (
     <ThemeContext.Provider value={theme}>
       <ToastProvider>
-        <Main themePref={pref} onThemePref={changePref} />
+        <Main appearance={appearance} />
       </ToastProvider>
     </ThemeContext.Provider>
   );
 };
 
-const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (p: ThemePref) => void }) => {
+const Main = ({ appearance }: { appearance: Appearance }) => {
+  const { themePref, onThemePref } = appearance;
   const t = useTheme();
   const s = useStyles();
   const toast = useToast();
@@ -89,6 +121,18 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
 
   // The Lists and Calls tabs keep their own state; these only let the back button reach into them.
   const importsRef = useRef<ImportsHandle>(null);
+  // The sales workspace: who is in Focus, the search palette, and the call placed from the app.
+  const [focus, setFocus] = useState<FocusTarget | null>(null);
+  const [searchOpen, setSearchOpen] = useState<boolean>(false);
+  const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
+  const [callScreen, setCallScreen] = useState<boolean>(false);
+  const [quickCall, setQuickCall] = useState<boolean>(false);
+  // What the power dialer is doing, so the call screen can show "3 of 25" and who is next.
+  const [dialerInfo, setDialerInfo] = useState<DialerInfo | null>(null);
+  const resumeDialerAfterSchedule = useRef<boolean>(false);
+  // Points, undo and WhatsApp live in providers rendered below; <Expose> hands them up here.
+  const engage = useRef<{ points: ReturnType<typeof usePoints>; undo: ReturnType<typeof useUndo>; wa: ReturnType<typeof useWaSend> } | null>(null);
+  const appLive = useRef<any>({});
   const callsRef = useRef<CallsHandle>(null);
   const [callingLists, setCallingLists] = useState<ImportList[]>([]);
   // "Called by" — shared with the post-call popup, remembered on the phone.
@@ -638,6 +682,8 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
     setCallLogs((prev) => prev.map((item) => (item && item.idempotencyKey === call.idempotencyKey ? { ...item, outcome: outcomeLabel } : item)));
 
     addLog(`Tagged ${call.number} as "${outcomeLabel}"`);
+    if (call.duration > 0) engage.current?.points.award('connected', call.idempotencyKey || `${last10(call.number)}:${call.timestamp}`, call.number);
+    if (activeCall && last10(activeCall.number) === last10(call.number)) setActiveCall(null);
     savedOutcomes.current = { ...savedOutcomes.current, [call.idempotencyKey]: outcomeLabel };
     const keep = Object.entries(savedOutcomes.current).slice(-500);   // newest 500 are plenty
     CallBridge?.saveUiCache?.('call_outcomes_v1', JSON.stringify(Object.fromEntries(keep)));
@@ -701,19 +747,45 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
 
   // One tap opens the dialer once: a second tap on the same number within 1.5 s is ignored.
   const lastDial = useRef<{ n: string; at: number }>({ n: '', at: 0 });
+  /* A call placed from the app: the mini call bar shows who it is, and it earns points — an attempt
+     (once an hour per number), plus the on-time bonus when a scheduled callback is made around
+     its time (10 min early to 30 min late). */
+  const startedCall = useCallback((phoneNumber: string, viaDialer = false) => {
+    const k = last10(phoneNumber);
+    const L = appLive.current;
+    const f: FocusTarget | null = L.focus && last10(L.focus.number) === k ? L.focus : null;
+    const owed = (L.callbackItems || []).find((o: Owed) => o.key === k);
+    const row = f ? null : importsRef.current?.visibleRows().find((r) => last10(r.target.number) === k)?.target;
+    setActiveCall({
+      number: phoneNumber, name: f?.name || owed?.name || row?.name, segment: f?.segment || owed?.segment || row?.segment,
+      startedAt: Date.now(), phase: 'dialing', dialer: viaDialer,
+    });
+    // Back from the phone's dialer, the call screen is waiting with the timer and the outcomes — so the
+    // native post-call popup stays away for this call (it still comes up if the app is closed).
+    setCallScreen(true);
+    NativeModules.CrmBridge?.markInAppCall?.(phoneNumber);
+    const p = engage.current?.points;
+    if (!p || !k) return;
+    p.award('attempt', `${k}:${new Date().toISOString().slice(0, 13)}`, phoneNumber);
+    const due = owed?.dueAt || f?.dueAt;
+    if (due && Date.now() >= due - 10 * 60000 && Date.now() <= due + 30 * 60000) p.award('ontime', `${k}:${due}`, phoneNumber);
+  }, []);
+
   const handleDial = useCallback((phoneNumber: string | undefined | null) => {
     if (!phoneNumber) return;
     const now = Date.now();
     if (lastDial.current.n === phoneNumber && now - lastDial.current.at < 1500) return;
     lastDial.current = { n: phoneNumber, at: now };
+    startedCall(phoneNumber);
     Linking.openURL(`tel:${phoneNumber}`).catch((err) => {
       addLog(`Dialer error: ${err.message || err}`);
       toast('This phone could not open the dialer', 'error');
     });
-  }, [addLog, toast]);
+  }, [addLog, toast, startedCall]);
 
   // The auto-dialer places the call itself (CALL_PHONE), falling back to the dialer without it.
   const autoDial = useCallback(async (phoneNumber: string) => {
+    startedCall(phoneNumber, true);
     try {
       if (CallBridge?.placeCall) await CallBridge.placeCall(phoneNumber);
       else await Linking.openURL(`tel:${phoneNumber}`);
@@ -721,7 +793,7 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
       addLog(`Auto-dial error: ${err?.message || err}`);
       toast('This phone could not place the call', 'error');
     }
-  }, [addLog, toast]);
+  }, [addLog, toast, startedCall]);
 
   /* ── Scheduled callbacks ──────────────────────────────────────────────────
    * Saved on the panel (shared with the team) and armed as an alarm on this phone, which rings
@@ -781,6 +853,7 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
     if (!smsFor) return;
     const to = smsFor;
     setSmsFor(null);
+    markMessaged(to.number);
     try {
       await panelAsk('callbacks.php', { action: 'sms_log', number: to.number, template, body }, syncEndpoint);
       addLog(`SMS "${template}" to ${to.number} logged.`);
@@ -810,6 +883,137 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
     setActiveTab(key);
   };
 
+  // Home's plum hero runs up under the status bar; every other tab has the white header there.
+  useEffect(() => {
+    if (activeTab === 'feed') CallBridge?.setSystemBarsTheme?.(true, t.grad.header[0]);
+    else CallBridge?.setSystemBarsTheme?.(t.dark, t.c.surface);
+  }, [activeTab, t]);
+
+  /* ── Focus workspace, mini call bar dispositions, search, keyboard ── */
+  setCrmEndpoint(syncEndpoint);
+  appLive.current = { focus, callbackItems, activeCall, searchOpen };
+  const openFocus = useCallback((t: FocusTarget) => setFocus(t), []);
+  const focusFromCall = (c: ActiveCall): FocusTarget => {
+    const row = importsRef.current?.visibleRows().find((r) => last10(r.target.number) === last10(c.number))?.target;
+    const owed = callbackItems.find((o) => o.key === last10(c.number));
+    return row || { number: c.number, name: c.name || owed?.name, segment: c.segment || owed?.segment, attempts: owed?.tries, dueAt: owed?.dueAt };
+  };
+
+  const dispose = useCallback(async (d: Disposition) => {
+    const c = appLive.current.activeCall as ActiveCall | null;
+    if (!c) return;
+    setActiveCall(null);
+    const e = engage.current;
+    // The same call tag the post-call popup would have sent, matched to the call by its start time.
+    const tag = { interested: 'Interested', callback: 'Callback Scheduled', no_answer: 'Not Answering', lost: 'Not Interested', converted: 'Converted' }[d];
+    NativeModules.CrmBridge?.tagInAppCall?.(c.number, c.startedAt, tag).catch(() => {});
+    // The power dialer goes on to the next person — after the callback time is picked, if that was it.
+    if (c.dialer) {
+      if (d === 'callback') { importsRef.current?.dialerPause(); resumeDialerAfterSchedule.current = true; }
+      else importsRef.current?.dialerNext();
+    } else setCallScreen(false);
+    try {
+      if (d === 'callback') { setCallScreen(false); setScheduleFor({ number: c.number, name: c.name, segment: c.segment }); return; }
+      if (d === 'no_answer') {
+        e?.wa.sendOne({ name: c.name, phone: c.number, segment: c.segment }, fillSales(TEMPLATES.en.missed, { name: c.name, segment: c.segment, me: calledBy }), { how: 'No answer' });
+        return;
+      }
+      const stage = d === 'interested' ? 'interested' : d === 'converted' ? 'converted' : 'lost';
+      const r = await crm.metaSet(c.number, { stage });
+      e?.points.celebrate(r.awarded);
+      importsRef.current?.patchMeta(c.number, r.meta);
+      // A sale asks for a referral; "not interested" for the reason — both in Focus.
+      if ((d === 'converted' || d === 'lost') && !c.dialer) setFocus({ ...focusFromCall(c), meta: r.meta, prompt: d === 'converted' ? 'referral' : undefined });
+      else if (d === 'converted') toast(`🎉 ${c.name || prettyPhone(c.number)} converted — add their referral from the list later`);
+      else if (d === 'lost') toast(`${c.name || prettyPhone(c.number)} marked not interested`);
+      else toast(`${c.name || prettyPhone(c.number)} marked interested`);
+      e?.undo.push(`Marked ${stage}`, () => crm.metaSet(c.number, { stage: 'contacted' }).then((b) => importsRef.current?.patchMeta(c.number, b.meta)));
+    } catch (err: any) {
+      toast(`Not saved — ${err?.message || err}`, 'error');
+    }
+  }, [calledBy, callbackItems, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* The phone's own call state: the line opening starts the timer, hanging up stops it and brings
+     the outcomes up — whoever ended the call, and wherever the counselor is in the app. */
+  useEffect(() => {
+    const sub = native.events?.addListener('CallIQCallState', (ev: { state: string; at: number }) => {
+      setActiveCall((c) => {
+        if (!c) return c;
+        if (ev.state === 'OFFHOOK' && c.phase !== 'live' && c.phase !== 'ended') return { ...c, phase: 'live', liveAt: Date.now() };
+        // IDLE straight after dialing, before the line opened, is the phone settling — not an end.
+        if (ev.state === 'IDLE' && c.phase === 'live') return { ...c, phase: 'ended', endedAt: Date.now() };
+        if (ev.state === 'IDLE' && c.phase === 'dialing' && Date.now() - c.startedAt > 4000) return { ...c, phase: 'ended', endedAt: Date.now() };
+        return c;
+      });
+      if (ev.state === 'IDLE' && appLive.current.activeCall) setCallScreen(true);
+    });
+    return () => sub?.remove();
+  }, []);
+
+  // The callback time for a power-dialer call is set (or the sheet closed): back to the list.
+  useEffect(() => {
+    if (!scheduleFor && resumeDialerAfterSchedule.current) {
+      resumeDialerAfterSchedule.current = false;
+      importsRef.current?.dialerResume();
+      setCallScreen(true);
+    }
+  }, [scheduleFor]);
+
+  // The power dialer ending closes its screen; it opening (from a list) shows it.
+  const dialerWasOn = useRef<boolean>(false);
+  useEffect(() => {
+    const on = !!dialerInfo;
+    if (on && !dialerWasOn.current) setCallScreen(true);
+    if (!on && dialerWasOn.current && !appLive.current.activeCall) setCallScreen(false);
+    dialerWasOn.current = on;
+  }, [dialerInfo]);
+
+  // Hardware keyboard: Ctrl+K search, Ctrl+Z undo, Space dial, W WhatsApp, N next, 1-5 outcome.
+  useEffect(() => {
+    const sub = native.events?.addListener('CallIQKey', (ev: { key: string; ctrl: boolean }) => {
+      const L = appLive.current;
+      const e = engage.current;
+      if (ev.ctrl && ev.key === 'k') { setSearchOpen(true); return; }
+      if (ev.ctrl && ev.key === 'z') { e?.undo.undoLast(); return; }
+      if (ev.key === 'escape') { if (L.searchOpen) setSearchOpen(false); else setFocus(null); return; }
+      if (ev.ctrl || TextInput.State.currentlyFocusedInput()) return;   // typing
+      const f: FocusTarget | null = L.focus;
+      if (ev.key === 'space') {
+        if (f) handleDial(f.number);
+        else if (!importsRef.current?.dialerCallNow()) toast('Open someone (or start the power dialer) first');
+      } else if (ev.key === 'w') {
+        const who = f || importsRef.current?.dialerPerson();
+        if (who) e?.wa.sendOne({ name: who.name, phone: who.number, segment: who.segment }, fillSales(TEMPLATES.en.missed, { name: who.name, segment: who.segment, me: calledBy }));
+      } else if (ev.key === 'n') {
+        const nx = importsRef.current?.next(f?.number);
+        if (nx) setFocus(nx);
+      } else if (/^[1-5]$/.test(ev.key)) {
+        const d = (['interested', 'callback', 'no_answer', 'lost', 'converted'] as Disposition[])[Number(ev.key) - 1];
+        if (L.activeCall) dispose(d);
+        else if (f) setActiveCall({ number: f.number, name: f.name, segment: f.segment, startedAt: Date.now() });
+      }
+    });
+    return () => sub?.remove();
+  }, [handleDial, dispose, calledBy, toast]);
+
+  /* A lead who picks up (or calls in and talks) needs no more drip messages. */
+  const dripSeen = useRef<number>(Date.now());
+  useEffect(() => {
+    const wa = engage.current?.wa;
+    if (!wa) return;
+    const fresh = callLogs.filter((c) => c && c.timestamp > dripSeen.current && c.duration > 0);
+    if (!fresh.length) return;
+    dripSeen.current = Math.max(...fresh.map((c) => c.timestamp));
+    fresh.forEach((c) => { if (wa.drips[last10(c.number)]) wa.stopDrip(c.number, 'stopped — they answered a call'); });
+  }, [callLogs]);
+
+  /* This phone's own settings, snapshotted every 60 seconds (Stats → Workspace backup). */
+  useEffect(() => {
+    autosave().catch(() => {});
+    const timer = setInterval(() => { autosave().catch(() => {}); }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   const setupLeft = setup ? setup.steps.filter((x) => x.required && !x.ok).length : 0;
   const sync: { icon: IconName; label: string; fg: string; bg: string; onPress: () => void } = setup?.syncError
     ? { icon: 'sync_problem', label: 'Not uploading', fg: t.c.danger, bg: t.c.dangerSoft, onPress: () => setIsPopupSetupOpen(true) }
@@ -818,37 +1022,57 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
       : { icon: 'cloud_done', label: 'Synced', fg: t.c.success, bg: t.c.successSoft, onPress: () => setIsPopupSetupOpen(true) };
 
   const TABS: { key: Tab; icon: IconName; label: string; badge?: number }[] = [
-    { key: 'feed', icon: 'call', label: 'Calls' },
+    { key: 'feed', icon: 'home', label: 'Home' },
     { key: 'imports', icon: 'format_list_bulleted', label: 'Lists' },
     { key: 'callbacks', icon: 'phone_callback', label: 'Callbacks', badge: callbackCount },
+    { key: 'stats', icon: 'bar_chart', label: 'Reports' },
   ];
 
+  /* Home's quick actions and the centre call button. */
+  const powerDialList = (id: number) => { setQuickCall(false); setActiveTab('imports'); importsRef.current?.openListById(id, 'to_call', true); };
+  const onTile = useCallback((k: 'start' | 'lists' | 'callbacks' | 'reports') => {
+    if (k === 'start') setQuickCall(true);
+    else setActiveTab(k === 'lists' ? 'imports' : k === 'callbacks' ? 'callbacks' : 'stats');
+  }, []);
+  const syncPill = (glass: boolean) => (
+    <Tactile
+      onPress={sync.onPress}
+      disabled={syncing}
+      scaleTo={0.92}
+      unstable_pressDelay={0}
+      accessibilityRole="button"
+      accessibilityLabel={`Upload status: ${sync.label}`}
+      hitSlop={6}
+      style={[s.syncPill, { backgroundColor: glass ? 'rgba(255,255,255,0.16)' : sync.bg }]}
+    >
+      {syncing || pendingQueueCount > 0
+        ? <PulseDot color={setup?.syncError ? t.c.coral : t.c.amber} size={7} />
+        : <Icon name={sync.icon} size={15} color={glass ? '#FFFFFF' : sync.fg} />}
+      <Text style={[s.syncText, { color: glass ? '#FFFFFF' : sync.fg }]}>{syncing ? 'Uploading…' : sync.label}</Text>
+    </Tactile>
+  );
+
   return (
-    <View style={s.container}>
-      {/* Header */}
-      <View style={s.header}>
-        <View style={s.logo}><Icon name="phone_in_talk" size={22} color={t.c.onPrimary} /></View>
-        <View style={{ flex: 1 }}>
-          <Text style={s.brand}>Caller IQ</Text>
-          <Text style={s.brandSub} numberOfLines={1}>Internship Studio{setup?.model ? ` · ${setup.model}` : ''}</Text>
+    <WhatsAppProvider syncEndpoint={syncEndpoint} addLog={addLog} me={calledBy}>
+    <EngageProvider calls={callLogs} ready={!!syncEndpoint}>
+    <Expose to={engage} />
+    <Gradient colors={t.grad.page} angle={180} style={s.container}>
+      {/* Header — Home has its own plum hero instead */}
+      {activeTab !== 'feed' && (
+        <View style={s.header}>
+          <View style={{ flex: 1, minWidth: 92 }}>
+            <Logo size={22} />
+            <Text style={s.brandSub} numberOfLines={1}>Internship Studio{setup?.model ? ` · ${setup.model}` : ''}</Text>
+          </View>
+          {syncPill(false)}
+          <WhatsAppBadge style={s.syncPill} textStyle={s.syncText} compact />
+          <IconButton icon="search" label="Find anyone (Ctrl+K)" tone="outlined" size={38} onPress={() => setSearchOpen(true)} />
+          <IconButton icon="settings" label="Settings" tone="outlined" size={38} badge={setupLeft} onPress={() => setIsAdminModalOpen(true)} />
         </View>
-        <Tactile
-          onPress={sync.onPress}
-          disabled={syncing}
-          scaleTo={0.92}
-          unstable_pressDelay={0}
-          accessibilityRole="button"
-          accessibilityLabel={`Upload status: ${sync.label}`}
-          hitSlop={6}
-          style={[s.syncPill, { backgroundColor: sync.bg }]}
-        >
-          {syncing || pendingQueueCount > 0
-            ? <PulseDot color={setup?.syncError ? t.c.coral : t.c.amber} size={7} />
-            : <Icon name={sync.icon} size={15} color={sync.fg} />}
-          <Text style={[s.syncText, { color: sync.fg }]}>{syncing ? 'Uploading…' : sync.label}</Text>
-        </Tactile>
-        <IconButton icon="settings" label="Settings" tone="outlined" size={38} onPress={() => setIsAdminModalOpen(true)} />
-      </View>
+      )}
+
+      {activeTab !== 'feed' && <PointsBar onPress={() => setActiveTab('stats')} />}
+      <DialRequestBanner onCall={handleDial} />
 
       {/* Tabs — all mounted, so what each has loaded survives switching. Hidden through a plain
           View: Android does not collapse a ScrollView set to display:none. */}
@@ -873,6 +1097,20 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
           onSnooze={snoozeCallback}
           onDoneCallback={doneCallback}
           onSms={openSms}
+          onFocus={openFocus}
+          onTile={onTile}
+          hero={(
+            <HomeHero
+              name={calledBy}
+              bell={callbackCount}
+              onBell={seeCallbacks}
+              onAvatar={() => setIsAdminModalOpen(true)}
+              onSearch={() => setSearchOpen(true)}
+              setupLeft={setupLeft}
+              onSetup={() => setIsPopupSetupOpen(true)}
+              status={<>{syncPill(true)}<WhatsAppBadge style={s.syncPill} textStyle={s.syncText} /></>}
+            />
+          )}
           simNicknames={simNicknames}
           onEditSims={editSims}
           onTag={tagCall}
@@ -891,6 +1129,9 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
           onSms={openSms}
           addLog={addLog}
           onListsChange={setCallingLists}
+          onFocus={openFocus}
+          onDialerChange={setDialerInfo}
+          onOpenReports={() => setActiveTab('stats')}
         />
       </View>
 
@@ -905,17 +1146,44 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
           onItems={setCallbackItems}
           onSchedule={openSchedule}
           onSms={openSms}
+          onFocus={openFocus}
           reloadSignal={callbacksReload}
           onOpenList={openList}
         />
       </View>
 
+      <View style={[{ flex: 1 }, activeTab !== 'stats' && s.hidden]}>
+        <StatsScreen active={activeTab === 'stats'} admin={isAdminUnlocked} lists={callingLists} />
+      </View>
+
+      {!!activeCall && (
+        <MiniCallBar call={activeCall} onPick={dispose} onOpen={() => setCallScreen(true)} onClose={() => setActiveCall(null)} />
+      )}
+
       {/* Bottom navigation */}
-      <View style={s.tabBar} accessibilityRole="tablist">
-        {TABS.map((tb) => (
-          <TabItem key={tb.key} icon={tb.icon} label={tb.label} badge={tb.badge} on={activeTab === tb.key} onPress={() => pressTab(tb.key)} />
-        ))}
-        <TabItem icon="checklist" label="Setup" badge={setupLeft} on={false} onPress={() => setIsPopupSetupOpen(true)} />
+      <View style={s.dockWrap}>
+        <View style={s.tabBar} accessibilityRole="tablist">
+          {TABS.slice(0, 2).map((tb) => (
+            <TabItem key={tb.key} icon={tb.icon} label={tb.label} badge={tb.badge} on={activeTab === tb.key} onPress={() => pressTab(tb.key)} />
+          ))}
+          <View style={s.fabSlot} />
+          {TABS.slice(2).map((tb) => (
+            <TabItem key={tb.key} icon={tb.icon} label={tb.label} badge={tb.badge} on={activeTab === tb.key} onPress={() => pressTab(tb.key)} />
+          ))}
+        </View>
+        {/* The centre call button: back to the call in progress, or start one. */}
+        <Tactile
+          onPress={() => (activeCall ? setCallScreen(true) : setQuickCall(true))}
+          scaleTo={0.9}
+          unstable_pressDelay={0}
+          accessibilityRole="button"
+          accessibilityLabel={activeCall ? 'Back to the call' : 'Start calling'}
+          style={s.fab}
+        >
+          <Gradient colors={t.grad.primary} angle={135} corner={32} style={s.fabInner}>
+            <Icon name={activeCall ? 'phone_in_talk' : 'call'} size={30} color="#FFFFFF" />
+          </Gradient>
+        </Tactile>
       </View>
 
       <TagCallSheet
@@ -961,6 +1229,59 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
 
       <SmsSheet target={smsFor} myName={calledBy} onSent={logSms} onClose={() => setSmsFor(null)} />
 
+      <FocusSheet
+        target={focus}
+        myName={calledBy}
+        onClose={() => setFocus(null)}
+        onDial={handleDial}
+        onSchedule={openSchedule}
+        onSms={openSms}
+        onMeta={(n, m) => importsRef.current?.patchMeta(n, m)}
+        onEditRow={(tg, patch) => importsRef.current?.editRow(tg, patch) ?? Promise.resolve()}
+        onPin={(tg, on) => importsRef.current?.pinRow(tg, on) ?? Promise.resolve()}
+        onReferral={() => importsRef.current?.refreshOpen()}
+        admin={isAdminUnlocked}
+      />
+
+      <CallScreen
+        call={activeCall}
+        dialer={dialerInfo}
+        visible={callScreen && (!!activeCall || !!dialerInfo)}
+        onClose={() => setCallScreen(false)}
+        onPick={dispose}
+        onCallAgain={() => { const c = activeCall; if (c) { setActiveCall(null); (c.dialer ? autoDial : handleDial)(c.number); } }}
+        onDialer={(a) => {
+          const h = importsRef.current;
+          if (!h) return;
+          if (a === 'next') { setActiveCall(null); h.dialerNext(); }
+          else if (a === 'callNow') h.dialerCallNow();
+          else if (a === 'pause') h.dialerPause();
+          else if (a === 'resume') h.dialerResume();
+          else if (a === 'skip') h.dialerSkip();
+          else { setActiveCall(null); h.dialerStop(); setCallScreen(false); }
+        }}
+        onSchedule={() => { const c = activeCall; setCallScreen(false); if (c) setScheduleFor({ number: c.number, name: c.name, segment: c.segment }); }}
+        onWhatsApp={() => { const c = activeCall; if (c) engage.current?.wa.sendOne({ name: c.name, phone: c.number, segment: c.segment }, fillSales(TEMPLATES.en.missed, { name: c.name, segment: c.segment, me: calledBy })); }}
+        onOpen={() => { const c = activeCall; setCallScreen(false); if (c) setFocus(focusFromCall(c)); }}
+      />
+
+      <QuickCallSheet
+        visible={quickCall}
+        onClose={() => setQuickCall(false)}
+        lists={callingLists}
+        onDial={(n) => { setQuickCall(false); handleDial(n); }}
+        onPowerDial={powerDialList}
+      />
+
+      <SearchSheet
+        visible={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        rows={searchOpen ? importsRef.current?.visibleRows() || [] : []}
+        owed={callbackItems}
+        calls={callLogs}
+        onPick={openFocus}
+      />
+
       <SimLabelsSheet
         visible={isSimModalOpen}
         sim1={getSimLabel('SIM 1')}
@@ -974,6 +1295,7 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
         onClose={() => setIsAdminModalOpen(false)}
         themePref={themePref}
         onThemePref={onThemePref}
+        appearance={appearance}
         appVersion={buildInfo?.versionName || setup?.appVersion || ''}
         unlocked={isAdminUnlocked}
         onUnlock={handleUnlock}
@@ -998,8 +1320,39 @@ const Main = ({ themePref, onThemePref }: { themePref: ThemePref; onThemePref: (
         onCheckBalance={checkBalanceNow}
         logs={systemLogs}
       />
+    </Gradient>
+    </EngageProvider>
+    </WhatsAppProvider>
+  );
+};
+
+/** A number pushed from the laptop dialer (the bridge's /dialer page): one tap to call it here. */
+const DialRequestBanner = ({ onCall }: { onCall: (n: string) => void }) => {
+  const t = useTheme();
+  const s = useStyles();
+  const wa = useWaSend();
+  const d = wa.dialRequest;
+  if (!d) return null;
+  return (
+    <View style={s.dialReq}>
+      <Icon name="smartphone" size={20} color={t.c.success} />
+      <View style={{ flex: 1 }}>
+        <Text style={s.dialReqTitle} numberOfLines={1}>From the laptop: {d.name || prettyPhone(d.phone)}</Text>
+        <Text style={s.brandSub} numberOfLines={1}>{d.name ? `${prettyPhone(d.phone)} · ` : ''}{d.segment || 'tap Call to dial on this phone'}</Text>
+      </View>
+      <IconButton icon="close" label="Dismiss" size={32} onPress={wa.clearDial} />
+      <Tactile onPress={() => { wa.clearDial(); onCall(d.phone); }} style={s.dialReqBtn} accessibilityRole="button" accessibilityLabel={`Call ${d.name || d.phone}`}>
+        <Icon name="call" size={18} color="#FFFFFF" />
+        <Text style={s.dialReqBtnText}>Call</Text>
+      </Tactile>
     </View>
   );
+};
+
+/** Hands the providers' APIs up to Main, which renders the providers and so cannot use their hooks. */
+const Expose = ({ to }: { to: React.MutableRefObject<any> }) => {
+  to.current = { points: usePoints(), undo: useUndo(), wa: useWaSend() };
+  return null;
 };
 
 const TabItem = ({ icon, label, badge, on, onPress }: { icon: IconName; label: string; badge?: number; on: boolean; onPress: () => void }) => {
@@ -1031,18 +1384,29 @@ const useStyles = makeStyles((t) => ({
   hidden: { display: 'none' },
 
   header: {
-    flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: space.lg, paddingVertical: 10,
-    backgroundColor: t.c.surface, borderBottomWidth: 1, borderBottomColor: t.c.border,
+    flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: space.lg, paddingVertical: 10,
+    backgroundColor: t.c.surface, borderBottomLeftRadius: 22, borderBottomRightRadius: 22, ...elevation(t), zIndex: 2,
   },
   logo: { width: 40, height: 40, borderRadius: radius.md, backgroundColor: t.c.primary, alignItems: 'center', justifyContent: 'center' },
   brand: { fontSize: 17, fontWeight: '700', color: t.c.text, letterSpacing: -0.2 },
   brandSub: { fontSize: 11.5, color: t.c.muted, marginTop: 1 },
   syncPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, minHeight: 30, borderRadius: radius.pill },
   syncText: { fontSize: 12, fontWeight: '600' },
-
-  tabBar: {
-    flexDirection: 'row', backgroundColor: t.c.surface, borderTopWidth: 1, borderTopColor: t.c.border, paddingTop: 8, paddingBottom: 8,
+  dialReq: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: space.lg, paddingVertical: 8,
+    backgroundColor: t.c.successSoft, borderBottomWidth: 1, borderBottomColor: t.c.emerald,
   },
+  dialReqTitle: { fontSize: 14, fontWeight: '700', color: t.c.text },
+  dialReqBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.emerald, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 8 },
+  dialReqBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
+
+  dockWrap: { paddingHorizontal: space.md, paddingBottom: space.sm, paddingTop: 22 },
+  tabBar: {
+    flexDirection: 'row', backgroundColor: t.c.surface, borderRadius: 26, paddingTop: 8, paddingBottom: 8, ...elevation(t, 2),
+  },
+  fabSlot: { width: 76 },
+  fab: { position: 'absolute', alignSelf: 'center', top: 0, borderRadius: 38, borderWidth: 4, borderColor: t.c.surface, backgroundColor: t.c.surface, ...glow(t), elevation: 12 },
+  fabInner: { width: 64, height: 64, alignItems: 'center', justifyContent: 'center' },
   tabItem: { flex: 1, alignItems: 'center', minHeight: 52 },
   // A background from the first frame: Android drops the corner radius when a colour is first
   // added to a view later, which left the selected pill square on every tab but the first.

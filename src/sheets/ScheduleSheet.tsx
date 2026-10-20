@@ -21,6 +21,7 @@ const slotLabel = (min: number) => new Date(2000, 0, 1, Math.floor(min / 60), mi
   .toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
 
 const QUICK: { label: string; at: () => number }[] = [
+  { label: 'In 15 min', at: () => Date.now() + 15 * 60 * 1000 },
   { label: 'In 30 min', at: () => Date.now() + 30 * 60 * 1000 },
   { label: 'In 1 hour', at: () => Date.now() + 60 * 60 * 1000 },
   { label: 'In 2 hours', at: () => Date.now() + 2 * 60 * 60 * 1000 },

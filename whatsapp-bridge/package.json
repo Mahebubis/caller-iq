@@ -1,0 +1,19 @@
+{
+  "name": "calliq-whatsapp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sends Caller IQ's WhatsApp messages through a WhatsApp Web session on this computer.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.34.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

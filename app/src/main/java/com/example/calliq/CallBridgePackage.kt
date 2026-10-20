@@ -7,10 +7,10 @@ import com.facebook.react.uimanager.ViewManager
 
 class CallBridgePackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
-        return listOf(CallBridgeModule(reactContext))
+        return listOf(CallBridgeModule(reactContext), CrmBridgeModule(reactContext))
     }
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
-        return emptyList()
+        return listOf(CiqArtManager(), CiqDonutManager())
     }
 }

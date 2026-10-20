@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- Voice notes on a contact's timeline (asked for the first time one is recorded). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- The in-app call screen: speaker / mute, and End call (asked for the first time it is used). -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -41,6 +46,10 @@
         <package android:name="com.coloros.phonemanager" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
+        </intent>
+        <!-- Dictating call notes: Android 11+ only sees the speech recogniser when it is declared. -->
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
         </intent>
     </queries>
 

@@ -6,6 +6,7 @@ import com.facebook.react.ReactNativeHost
 import com.facebook.react.ReactPackage
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.facebook.react.shell.MainReactPackage
+import com.facebook.react.views.text.ReactFontManager
 import com.facebook.soloader.SoLoader
 
 class MainApplication : Application(), ReactApplication {
@@ -30,6 +31,8 @@ class MainApplication : Application(), ReactApplication {
     override fun onCreate() {
         super.onCreate()
         SoLoader.init(this, false)
+        // The app's typeface, with every weight, so Text's fontWeight works with fontFamily "Plus Jakarta Sans".
+        ReactFontManager.getInstance().addCustomFont(this, "Plus Jakarta Sans", R.font.plus_jakarta_sans)
         /* If this process was killed mid-call (OEM cleaner, reboot), the dashboard is still showing
            that call as live. Close it now that we can see the phone is idle. */
         CallPresence.clearIfIdle(this)

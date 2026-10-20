@@ -31,6 +31,12 @@ object CallPopupLauncher {
     fun show(context: Context, call: CallLogHelper.CallRecord) {
         val app = context.applicationContext
 
+        // Placed from the app, which is still running: its own call screen asks for the outcome.
+        if (CrmBridgeModule.appHandles(app, call.number)) {
+            CallIqConfig.notePopup(app, "call placed from the app — its call screen asked for the outcome")
+            return
+        }
+
         if (!CallPopupOverlay.canShow(app)) {
             CallIqConfig.notePopup(app, "no “Display over other apps” permission — showed the notification instead")
             CallPopupNotifier.notify(app, call)

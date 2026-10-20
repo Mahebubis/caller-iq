@@ -1,6 +1,8 @@
 import React, { forwardRef, memo, useCallback, useDeferredValue, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { FlatList, NativeModules, Pressable, RefreshControl, Text, View } from 'react-native';
-import { makeStyles, radius, space, type, useTheme } from './theme';
+import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
+import { Avatar } from './art';
+import { HomeTop } from './HomeDash';
 import { ago, callbackTime, callTime, clock, dueIn, last10, num, plural, prettyPhone, talk } from './format';
 import {
   Appear, AttemptBadge, Banner, Button, EmptyState, Icon, IconButton, IconName, IndexBadge, MetricTile, Pill, ProgressBar, PulseDot,
@@ -10,6 +12,9 @@ import { CallLogItem, MAX_ATTEMPTS, ScheduleTarget, SetupInfo, SIM_SOURCE_TEXT, 
 import { toCall } from './ImportsScreen';
 import type { ImportList, Show } from './ImportsScreen';
 import type { Owed } from './CallbacksScreen';
+import type { FocusTarget } from './sheets/FocusSheet';
+import { useWaSend } from './whatsapp';
+import { serverTime } from './format';
 
 const { CallBridge } = NativeModules;
 
@@ -56,6 +61,10 @@ interface Props {
   onSnooze: (o: Owed, minutes: number) => void;
   onDoneCallback: (o: Owed) => void;
   onSms: (t: SmsTarget) => void;
+  onFocus: (t: FocusTarget) => void;
+  /** Home's plum header (built by App: it knows the name, the bell, the sync state). */
+  hero?: React.ReactNode;
+  onTile: (k: 'start' | 'lists' | 'callbacks' | 'reports') => void;
 }
 
 /* ── Live feed ──────────────────────────────────────────────────────────────
@@ -71,6 +80,8 @@ interface FeedItem {
   segment?: string;
   agent?: string;
   tries?: number;
+  heat?: number;
+  dnd?: boolean;
 }
 
 const FEED_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -100,10 +111,10 @@ const buildFeed = (calls: CallLogItem[], tasks: Owed[]): { alerts: Owed[]; items
     const key = last10(c.number);
     if (!kind || !key) return;
     const o = info.get(key);
-    put({ key, number: c.number, kind, at: c.timestamp, name: o?.name, segment: o?.segment, tries: o?.tries });
+    put({ key, number: c.number, kind, at: c.timestamp, name: o?.name, segment: o?.segment, tries: o?.tries, heat: o?.heat, dnd: o?.dnd });
   });
   tasks.forEach((o) => {
-    const base = { key: o.key, number: o.number, name: o.name, segment: o.segment, tries: o.tries };
+    const base = { key: o.key, number: o.number, name: o.name, segment: o.segment, tries: o.tries, heat: o.heat, dnd: o.dnd };
     if (o.dueAt && o.dueAt > now && o.dueAt <= now + UPCOMING_MS) put({ ...base, kind: 'scheduled', at: o.dueAt });
     else if (o.reason === 'imported' && o.since >= now - TASK_WINDOW_MS) put({ ...base, kind: 'task', at: o.since });
     else if (o.reason === 'missed' && o.lastAt >= now - FEED_WINDOW_MS) put({ ...base, kind: 'missed', at: o.lastAt, agent: o.agent });
@@ -118,7 +129,7 @@ const FEED_KIND: { [k in FeedKind]: { label: string; icon: IconName; tone: 'succ
   scheduled: { label: 'Callback', icon: 'alarm', tone: 'blue' },
 };
 
-const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms }: {
+const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms, onFocus }: {
   calls: CallLogItem[];
   tasks: Owed[];
   onDial: (n: string) => void;
@@ -126,9 +137,11 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms
   onSnooze: (o: Owed, minutes: number) => void;
   onDone: (o: Owed) => void;
   onSms: (t: SmsTarget) => void;
+  onFocus: (t: FocusTarget) => void;
 }) => {
   const t = useTheme();
   const s = useStyles();
+  const wa = useWaSend();
   // The clock: "2 min ago" keeps counting and due callbacks surface without anything being fetched.
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -148,6 +161,30 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms
 
   return (
     <View>
+      {/* WhatsApp replies from leads: the hottest thing on the screen. */}
+      {wa.replies.map((r, i) => {
+        const number = prettyPhone(r.number) || r.number;
+        return (
+          <Appear key={`reply-${r.number}-${r.at}`} index={i} style={s.replyAlert}>
+            <View style={s.alertHead}>
+              <PulseDot color={t.c.violet} size={9} />
+              <Text style={[s.alertTitle, { color: t.c.violet }]}>{r.dnd ? 'Opted out (DND)' : 'Replied - Priority'}</Text>
+              <Text style={[s.alertWhen, { color: t.c.violet }]}>{ago(serverTime(r.at))}</Text>
+            </View>
+            <Pressable onPress={() => onFocus({ number: r.number, name: r.name, segment: r.segment })} accessibilityRole="button">
+              <Text style={s.alertName} numberOfLines={1}>{r.name || number}</Text>
+              <Text style={s.listMeta} numberOfLines={1}>{r.name ? `${number} · ` : ''}{r.segment || 'WhatsApp'}{r.heat ? ` · heat ${r.heat}` : ''}</Text>
+            </Pressable>
+            <Text style={s.alertNote} numberOfLines={3}>“{r.text}”</Text>
+            <View style={s.alertBtns}>
+              <Button label="Call now" icon="call" variant="success" pill onPress={() => { wa.ackReply(r.number); onDial(r.number); }} style={{ flex: 2 }} />
+              <Button label="Open" icon="chevron_right" variant="secondary" pill onPress={() => onFocus({ number: r.number, name: r.name, segment: r.segment })} style={{ flex: 1 }} />
+              <IconButton icon="check" label="Seen — clear this reply" tone="outlined" onPress={() => wa.ackReply(r.number)} />
+            </View>
+          </Appear>
+        );
+      })}
+
       {alerts.map((o, i) => {
         const number = prettyPhone(o.number) || o.number;
         return (
@@ -166,7 +203,7 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms
             <View style={s.alertBtns}>
               <Button label="Call now" icon="call" variant="success" pill onPress={() => onDial(o.number)} style={{ flex: 2 }} accessibilityLabel={`Call ${o.name || number} now`} />
               <Button label="10 min" icon="snooze" variant="secondary" pill onPress={() => onSnooze(o, 10)} style={{ flex: 1 }} accessibilityLabel="Remind me again in 10 minutes" />
-              <IconButton icon="sms" label={`Send a quick SMS to ${o.name || number}`} tone="outlined" onPress={() => onSms({ number: o.number, name: o.name, segment: o.segment })} />
+              <IconButton icon="chat" label={`Auto-WhatsApp ${o.name || number}`} tone="outlined" disabled={!!o.dnd} onPress={() => wa.openSend({ name: o.name, phone: o.number, segment: o.segment })} />
               <IconButton icon="check" label="Done — clear this callback" tone="outlined" onPress={() => onDone(o)} />
             </View>
           </Appear>
@@ -194,22 +231,22 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms
           const number = prettyPhone(it.number) || it.number;
           return (
             <Appear key={it.key} index={i} style={[s.feedRow, i > 0 && s.listRowDivider]}>
-              <IndexBadge n={i + 1} />
-              <View style={[s.feedIcon, { backgroundColor: bg }]}><Icon name={k.icon} size={18} color={fg} /></View>
-              <View style={{ flex: 1, gap: 3 }}>
+              <IndexBadge n={wa.replies.length + alerts.length + i + 1} />
+              <Avatar name={it.name} phone={it.number} size={42} />
+              <Pressable style={{ flex: 1, gap: 3 }} onPress={() => onFocus({ number: it.number, name: it.name, segment: it.segment, attempts: it.tries })} accessibilityRole="button" accessibilityLabel={`Open ${it.name || number}`}>
                 <Text style={s.feedName} numberOfLines={1}>{it.name || number}</Text>
-                <Text style={s.listMeta} numberOfLines={1}>
-                  <Text style={{ color: fg, fontWeight: '700' }}>{it.kind === 'scheduled' ? `${k.label} ${callbackTime(it.at)}` : k.label}</Text>
-                  {` · ${it.kind === 'scheduled' ? dueIn(it.at) : ago(it.at)}`}{it.agent ? ` · ${it.agent}` : ''}
-                </Text>
-                {(!!it.segment || it.tries != null) && (
+                <Text style={s.listMeta} numberOfLines={1}>{it.name ? `${number} · ` : ''}{it.kind === 'scheduled' ? dueIn(it.at) : ago(it.at)}{it.agent ? ` · ${it.agent}` : ''}</Text>
+                <Pill label={it.kind === 'scheduled' ? `${k.label} ${callbackTime(it.at)}` : k.label} icon={k.icon} fg={fg} bg={bg} />
+                {(!!it.segment || it.tries != null || !!it.heat) && (
                   <View style={s.feedTags}>
                     {!!it.segment && <Pill label={it.segment} fg={t.c.textSoft} bg={t.c.surfaceAlt} icon="sell" />}
                     {it.tries != null && <AttemptBadge n={it.tries} max={MAX_ATTEMPTS} />}
+                    {!!it.heat && <Pill label={`Heat ${it.heat}`} icon="local_fire_department" fg={it.heat >= 70 ? t.c.danger : t.c.orange} bg={t.c.surfaceAlt} />}
                   </View>
                 )}
-              </View>
-              <Button label="Call now" icon="call" size="sm" variant="success" pill onPress={() => onDial(it.number)} accessibilityLabel={`Call ${it.name || number} now`} />
+              </Pressable>
+              <IconButton icon="chat" label={`Auto-WhatsApp ${it.name || number}`} size={36} tone="outlined" disabled={!!it.dnd} onPress={() => wa.openSend({ name: it.name, phone: it.number, segment: it.segment })} />
+              <Button label="Call" icon="call" size="sm" variant="success" pill onPress={() => onDial(it.number)} accessibilityLabel={`Call ${it.name || number} now`} />
             </Appear>
           );
         })}
@@ -269,6 +306,9 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
 
   const header = (
     <View>
+      {p.hero}
+      <HomeTop calls={p.calls} callbacks={p.tasks.length} onTile={p.onTile} />
+
       {/* Everything this phone still needs, from one list that knows this Android version and maker. */}
       {(setupOff.length > 0 || setupUnsure.length > 0) && (
         <Banner
@@ -295,38 +335,7 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
         />
       )}
 
-      {/* Today — a 2×2 bento of live numbers from this phone's call log */}
-      <View style={s.todayHead}>
-        <Text style={s.todayTitle} accessibilityRole="header">Today</Text>
-        <Text style={s.todayDate}>{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })}</Text>
-      </View>
-      <View style={s.bentoRow}>
-        <MetricTile icon="call" label="Calls" value={num(today.count)} sub="made & received" fg={t.c.link} bg={t.c.primarySoft} />
-        <MetricTile icon="timer" label="Talk time" value={talk(today.talkSec)} sub="on the phone" fg={t.c.violet} bg={t.c.violetSoft} />
-      </View>
-      <View style={[s.bentoRow, { marginBottom: space.lg }]}>
-        <MetricTile
-          icon="insights"
-          label="Connected"
-          value={today.rate == null ? '—' : `${today.rate}%`}
-          sub="of today’s calls"
-          fg={t.c.success}
-          bg={t.c.successSoft}
-        />
-        <MetricTile
-          icon={p.pendingQueueCount > 0 ? 'cloud_upload' : 'cloud_done'}
-          label="To upload"
-          value={num(p.pendingQueueCount)}
-          fg={p.pendingQueueCount > 0 ? t.c.warning : t.c.success}
-          bg={p.pendingQueueCount > 0 ? t.c.warningSoft : t.c.successSoft}
-          pulse={p.syncing}
-          action={p.pendingQueueCount > 0 ? (p.syncing ? 'Uploading…' : 'Upload now') : undefined}
-          onAction={p.syncing ? undefined : p.onUploadNow}
-          sub={p.pendingQueueCount > 0 ? undefined : 'all synced'}
-        />
-      </View>
-
-      <LiveFeed calls={p.calls} tasks={p.tasks} onDial={p.onDial} onSeeAll={p.onSeeCallbacks} onSnooze={p.onSnooze} onDone={p.onDoneCallback} onSms={p.onSms} />
+      <LiveFeed calls={p.calls} tasks={p.tasks} onDial={p.onDial} onSeeAll={p.onSeeCallbacks} onSnooze={p.onSnooze} onDone={p.onDoneCallback} onSms={p.onSms} onFocus={p.onFocus} />
 
       {/* The admin's calling lists, by name — one tap opens the list in the Lists tab. */}
       <SectionHeader title="Calling lists" action={p.lists.length ? `See all (${p.lists.length})` : 'Open'} onAction={p.onSeeAllLists} />
@@ -447,7 +456,10 @@ const CallRow = memo(({ item, index, sim, onTag, onDial, onSchedule }: {
   return (
     <Appear index={index} style={s.callCard}>
       <View style={s.callTop}>
-        <View style={[s.typeIcon, { backgroundColor: bg }]}><Icon name={ty.icon} size={20} color={fg} /></View>
+        <View>
+          <Avatar phone={item.number} size={44} />
+          <View style={[s.typeBadge, { backgroundColor: bg }]}><Icon name={ty.icon} size={12} color={fg} /></View>
+        </View>
         <View style={{ flex: 1 }}>
           <View style={s.callTitleRow}>
             <IndexBadge n={index + 1} />
@@ -497,8 +509,7 @@ export default memo(CallsScreen);
 const useStyles = makeStyles((t) => ({
   body: { padding: space.lg, paddingBottom: space.xxxl },
   card: {
-    backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: t.c.border,
-    padding: space.lg, marginBottom: space.md,
+    backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginBottom: space.md, ...elevation(t),
   },
   link: { fontSize: 13, fontWeight: '600', color: t.c.link },
 
@@ -523,7 +534,7 @@ const useStyles = makeStyles((t) => ({
   feedTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
 
   alert: {
-    backgroundColor: t.c.dangerSoft, borderRadius: radius.lg, borderWidth: 2, borderColor: t.c.coral,
+    backgroundColor: t.c.dangerSoft, borderRadius: radius.xl, borderWidth: 2, borderColor: t.c.coral,
     padding: space.lg, marginBottom: space.md, gap: 6,
   },
   alertHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -532,6 +543,10 @@ const useStyles = makeStyles((t) => ({
   alertName: { ...type.cardTitle, color: t.c.text },
   alertNote: { fontSize: 13, color: t.c.textSoft, fontStyle: 'italic' },
   alertBtns: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
+  replyAlert: {
+    backgroundColor: t.c.violetSoft, borderRadius: radius.xl, borderWidth: 2, borderColor: t.c.violet,
+    padding: space.lg, marginBottom: space.md, gap: 6,
+  },
 
   simCard: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
   simIcon: { width: 38, height: 38, borderRadius: 10, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
@@ -539,8 +554,11 @@ const useStyles = makeStyles((t) => ({
   simSub: { fontSize: 12.5, color: t.c.muted, marginTop: 2 },
 
   callCard: {
-    backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: t.c.border,
-    padding: 14, marginBottom: 10,
+    backgroundColor: t.c.surface, borderRadius: radius.lg, padding: 14, marginBottom: 10, ...elevation(t),
+  },
+  typeBadge: {
+    position: 'absolute', right: -3, bottom: -3, width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: t.c.surface,
   },
   callTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   typeIcon: { width: 40, height: 40, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },

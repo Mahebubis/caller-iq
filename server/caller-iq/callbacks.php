@@ -6,11 +6,13 @@
  *   list { since: 'today' | '7' | '15' | '30' | 'all' (default '30'), q? }
  *        → { callbacks: [ { number, name, reason, since_at, last_at, missed, tries, calls,
  *                           agent, device_id, last_outcome, segment, import_id, import_status,
- *                           due_at, note, sched_device, sms_count, sms_at } ],
+ *                           due_at, note, sched_device, sms_count, sms_at, wa_count, wa_at } ],
  *            total, since }
  *   schedule   { number, due_ms, note?, name? }  → sets the number's callback time (replaces any open one)
  *   unschedule { number }                       → clears it
- *   sms_log    { number, template?, body }      → records an SMS a counselor sent that number
+ *   sms_log    { number, template?, body, channel? }  → records an SMS (or, with channel 'whatsapp',
+ *              a WhatsApp message) a counselor sent that number; { items: [{ number, body }] } logs
+ *              many at once (a WhatsApp campaign), at most 500
  *
  * A number is owed when its newest "owed" event — a missed / rejected / blocked call, or a call
  * tagged "Callback Scheduled" or "Not Answering" — is newer than the last call where someone
@@ -30,6 +32,7 @@
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/auth.php';
 require_once __DIR__ . '/ciq_lib.php';
+require_once __DIR__ . '/crm_lib.php';
 
 mysqli_report(MYSQLI_REPORT_OFF);
 set_exception_handler(function (Throwable $e) {
@@ -85,6 +88,11 @@ $conn->query("CREATE TABLE IF NOT EXISTS caller_iq_sms (
     PRIMARY KEY (id),
     KEY k_num (number_norm, sent_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+/* 'sms' or 'whatsapp'; tables from before WhatsApp get the column, every old row an SMS. */
+$hasChannel = $conn->query("SHOW COLUMNS FROM caller_iq_sms LIKE 'channel'");
+if ($hasChannel && $hasChannel->num_rows === 0) {
+    $conn->query("ALTER TABLE caller_iq_sms ADD COLUMN channel VARCHAR(12) NOT NULL DEFAULT 'sms' AFTER number_norm");
+}
 
 function cb_all(mysqli $conn, string $sql): array
 {
@@ -152,18 +160,32 @@ if ($action === 'schedule' || $action === 'unschedule') {
 }
 
 if ($action === 'sms_log') {
-    $num = ciq_norm_number((string)($in['number'] ?? ''));
-    if (strlen($num) < 6) api_error('That phone number is not valid.');
-    $body = mb_substr(trim((string)($in['body'] ?? '')), 0, 1000);
-    if ($body === '') api_error('The message is empty.');
+    $channel = (string)($in['channel'] ?? 'sms') === 'whatsapp' ? 'whatsapp' : 'sms';
     $tpl = ciq_str($in['template'] ?? '', 80);
     $dev = ciq_str($in['device_id'] ?? '', 64);
     $now = date('Y-m-d H:i:s');
-    $st = $conn->prepare("INSERT INTO caller_iq_sms (number_norm, template, body, device_id, created_by, sent_at) VALUES (?,?,?,?,?,?)");
-    $st->bind_param('ssssis', $num, $tpl, $body, $dev, $ME, $now);
-    if (!$st->execute()) api_error('Could not log the SMS: ' . $st->error, 500);
-    $n = (int)cb_all($conn, "SELECT COUNT(*) n FROM caller_iq_sms WHERE number_norm = " . cb_e($conn, $num))[0]['n'];
-    api_success(['number' => $num, 'sms_at' => $now, 'sms_count' => $n], 'SMS logged');
+    $items = isset($in['items']) && is_array($in['items']) ? $in['items'] : [['number' => $in['number'] ?? '', 'body' => $in['body'] ?? '']];
+    if (count($items) > 500) api_error('Log at most 500 messages at a time.');
+    $st = $conn->prepare("INSERT INTO caller_iq_sms (number_norm, channel, template, body, device_id, created_by, sent_at) VALUES (?,?,?,?,?,?,?)");
+    $logged = [];
+    foreach ($items as $it) {
+        $num = ciq_norm_number((string)($it['number'] ?? ''));
+        $body = mb_substr(trim((string)($it['body'] ?? '')), 0, 1000);
+        if (strlen($num) < 6 || $body === '') {
+            if (count($items) === 1) api_error(strlen($num) < 6 ? 'That phone number is not valid.' : 'The message is empty.');
+            continue;
+        }
+        $st->bind_param('sssssis', $num, $channel, $tpl, $body, $dev, $ME, $now);
+        if (!$st->execute()) api_error('Could not log the message: ' . $st->error, 500);
+        $logged[$num] = true;
+    }
+    $st->close();
+    if (count($items) === 1) {
+        $num = (string)array_key_first($logged);
+        $n = (int)cb_all($conn, "SELECT COUNT(*) n FROM caller_iq_sms WHERE number_norm = " . cb_e($conn, $num) . " AND channel = " . cb_e($conn, $channel))[0]['n'];
+        api_success(['number' => $num, 'channel' => $channel, 'sms_at' => $now, 'sms_count' => $n], $channel === 'whatsapp' ? 'WhatsApp logged' : 'SMS logged');
+    }
+    api_success(['logged' => count($logged), 'channel' => $channel, 'at' => $now], 'Messages logged');
 }
 
 if ($action !== 'list') api_error('Unknown action', 400);
@@ -297,11 +319,21 @@ if ($hasImports) {
     }
 }
 
-/* SMS already sent to each number. */
+/* SMS and WhatsApp messages already sent to each number. */
 $sms = [];
-foreach (cb_all($conn, "SELECT number_norm, COUNT(*) n, MAX(sent_at) at FROM caller_iq_sms WHERE number_norm IN (" .
+foreach (cb_all($conn, "SELECT number_norm, SUM(channel <> 'whatsapp') n, MAX(IF(channel <> 'whatsapp', sent_at, NULL)) at,
+                               SUM(channel = 'whatsapp') wn, MAX(IF(channel = 'whatsapp', sent_at, NULL)) wat
+                        FROM caller_iq_sms WHERE number_norm IN (" .
                         implode(',', array_map(fn($n) => cb_e($conn, (string)$n), array_keys($out))) . ") GROUP BY number_norm") as $x) {
     $sms[$x['number_norm']] = $x;
+}
+
+/* Deal fields: heat score, stage, DND (a DND number is never sent bulk WhatsApp). */
+crm_ensure_schema($conn);
+$meta = [];
+foreach (array_chunk(array_map('strval', array_keys($out)), 1000) as $part) {
+    foreach (cb_all($conn, "SELECT number_norm, heat, stage, dnd, replied_at FROM caller_iq_contact_meta WHERE number_norm IN (" .
+                            implode(',', array_map(fn($n) => cb_e($conn, $n), $part)) . ")") as $x) $meta[$x['number_norm']] = $x;
 }
 
 $q = strtolower(trim((string)($in['q'] ?? '')));
@@ -313,6 +345,12 @@ foreach ($out as $n => $o) {
     $o['name']  = $names[$n] ?? ($schedNames[$n] ?? '');
     $o['sms_count'] = (int)($sms[$n]['n'] ?? 0);
     $o['sms_at'] = $sms[$n]['at'] ?? '';
+    $o['wa_count'] = (int)($sms[$n]['wn'] ?? 0);
+    $o['wa_at'] = $sms[$n]['wat'] ?? '';
+    $o['heat'] = (int)($meta[$n]['heat'] ?? 0);
+    $o['stage'] = (string)($meta[$n]['stage'] ?? '');
+    $o['dnd'] = (int)($meta[$n]['dnd'] ?? 0);
+    $o['replied_at'] = $meta[$n]['replied_at'] ?? '';
     $o['agent'] = $agents[$o['device_id']] ?? '';
     if ($o['segment'] === '' && isset($segs[$n])) { $o['segment'] = $segs[$n]['segment']; $o['import_id'] = (int)$segs[$n]['import_id']; }
     if ($q !== '') {

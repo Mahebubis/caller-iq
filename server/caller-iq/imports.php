@@ -14,9 +14,18 @@
  *   dupes    { phones[] }            → which numbers are already on other lists, BEFORE importing
  *   list                                 → every import with its reach
  *   detail   { id, page, per_page, sort, dir, q, show, agent, since }  → summary + agents + rows
+ *   contacts { id, … same filters }      → { contacts: [ { id, name, phone } ] } — everyone matching,
+ *            not just one page, for "select all" and WhatsApp campaigns (at most 5,000)
  *   export   { id, … same filters }      → CSV of the original columns + call stats (streamed)
  *   delete   { id }   rename { id, name }
  *   bulk     { id, row_ids[], op: 'status' | 'move' | 'delete', status?, to_id? }  → { changed }
+ *   edit_row { id, row_id, name?, phone?, status? }  → fixes one person's name, number or status
+ *   agents   { }                                   → the team's phones, to assign people to
+ *   assign   { id, agents[], row_ids[] | all, …filters }  → round-robin: people shared out equally
+ *   chunk    { …, append: true }  on a finished list adds rows it does not have yet (Google Sheet sync)
+ *   pin      { id, row_id, pinned }                  → keeps a VIP at the top of the list
+ *   merge_lists { id, into_id }   → moves everyone into the other list (one row per number), drops this one
+ *   split_list  { id, size }      → keeps the first `size` people, moves the rest into new lists of `size`
  *   annotate { id, row_id, called_by?, comment?, tags[]? }  → saves a counselor's note on one row
  *
  * Each row also reports `attempts` (our outgoing calls since the list was uploaded) and
@@ -46,6 +55,7 @@
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/auth.php';
 require_once __DIR__ . '/ciq_lib.php';
+require_once __DIR__ . '/crm_lib.php';
 
 mysqli_report(MYSQLI_REPORT_OFF);
 set_exception_handler(function (Throwable $e) {
@@ -69,7 +79,8 @@ if ($isApp) {
     if (!defined('CALLER_IQ_APP_KEY') || !hash_equals((string)CALLER_IQ_APP_KEY, $appKey)) {
         api_error('This phone is not allowed to read calling lists.', 403);
     }
-    if (!in_array($action, ['list', 'detail', 'annotate', 'bulk'], true)) {
+    if (!in_array($action, ['list', 'detail', 'contacts', 'annotate', 'bulk', 'start', 'chunk', 'finish', 'dupes', 'preview',
+                            'edit_row', 'pin', 'merge_lists', 'split_list', 'agents', 'assign'], true)) {
         api_error('This action is only available in the admin panel.', 403);
     }
     $ME = 0; // Device acting as an agent
@@ -90,9 +101,12 @@ const IMP_HIDDEN = "c.device_id NOT IN (SELECT device_id FROM caller_iq_devices 
 const IMP_IMPORT_STATUSES = ['needs_callback', 'missed_call', 'not_called', 'pending_followup', 'called'];
 const IMP_DUPE_MODES = ['skip', 'overwrite', 'merge', 'keep'];
 
-/* Over a row r, its call stats s (connected, outgoing, missed, last_tag) and its open callback
-   time sc (imp_sched_join). */
-const IMP_CALLED = "(COALESCE(s.outgoing, 0) > 0 OR COALESCE(s.connected, 0) > 0 OR r.called_by <> '' OR r.import_status = 'called')";
+/* Over a row r, its call stats s and its open callback time sc (imp_sched_join). Status only
+   counts calls made SINCE THE LIST WAS UPLOADED (attempts, conn_since, missed_since, tag_since):
+   counting a number's whole history made a fresh "Missed call" list show as mostly Called, because
+   someone had spoken to those people at some point before. The all-time totals (total, connected…)
+   are still reported as history. */
+const IMP_CALLED = "(COALESCE(s.attempts, 0) > 0 OR COALESCE(s.conn_since, 0) > 0 OR r.called_by <> '' OR r.import_status = 'called')";
 /* One live status per row, first match wins. The call log moves a row on only by reaching the
    person (or a "Callback Scheduled" tag); until then the status it was imported with stands. A
    callback is owed (needs_callback / missed_call) until someone actually speaks to the person —
@@ -100,17 +114,20 @@ const IMP_CALLED = "(COALESCE(s.outgoing, 0) > 0 OR COALESCE(s.connected, 0) > 0
 const IMP_STATUS = "(CASE
     WHEN r.phone_norm = '' THEN 'no_phone'
     WHEN sc.due_at IS NOT NULL THEN 'scheduled'
-    WHEN s.last_tag = 'Callback Scheduled' THEN 'scheduled'
-    WHEN COALESCE(s.connected, 0) > 0 THEN 'connected'
+    WHEN s.tag_since = 'Callback Scheduled' THEN 'scheduled'
+    WHEN COALESCE(s.conn_since, 0) > 0 THEN 'connected'
     WHEN r.called_by <> '' THEN 'called'
     WHEN r.import_status = 'needs_callback' THEN 'needs_callback'
     WHEN r.import_status = 'missed_call' THEN 'missed_call'
     WHEN r.import_status = 'pending_followup' THEN 'scheduled'
     WHEN r.import_status = 'called' THEN 'called'
-    WHEN COALESCE(s.missed, 0) > 0 THEN 'missed_call'
-    WHEN COALESCE(s.outgoing, 0) > 0 THEN 'not_connected'
+    WHEN COALESCE(s.missed_since, 0) > 0 THEN 'missed_call'
+    WHEN COALESCE(s.attempts, 0) > 0 THEN 'not_connected'
     ELSE 'not_called' END)";
 const IMP_TO_CALL = "('needs_callback', 'missed_call', 'not_called')";
+/* "Ghosting": warm leads (interested, qualified, hot or comparing) with nothing heard for 3 days. */
+define('IMP_GHOSTING', "((cm.stage IN ('interested', 'qualified') OR cm.sentiment IN ('hot', 'comparing')) AND COALESCE(cm.stage, '') NOT IN ('converted', 'lost')
+    AND COALESCE(cm.dnd, 0) = 0 AND GREATEST(COALESCE(cm.activity_at, '2000-01-01'), COALESCE(s.last_at, '2000-01-01')) < '" . date('Y-m-d H:i:s', time() - 3 * 86400) . "')");
 const IMP_DONE    = "('connected', 'called', 'not_connected')";
 const IMP_STATUS_LABEL = [
     'needs_callback' => 'Needs callback', 'missed_call' => 'Missed call', 'scheduled' => 'Scheduled',
@@ -154,13 +171,24 @@ function imp_sched_join(mysqli $conn): string
                         GROUP BY sc.number_norm) sc ON sc.n = r.phone_norm";
 }
 
-/** SMS sent to each number from the app (callbacks.php "sms_log"), as sm: count and last time. */
+/**
+ * Messages sent to each number from the app (callbacks.php "sms_log"), as sm: SMS count and last
+ * time, and the same for WhatsApp. A table from before the channel column holds SMS only.
+ */
 function imp_sms_join(mysqli $conn): string
 {
-    static $has = null;
-    if ($has === null) { $r = $conn->query("SHOW TABLES LIKE 'caller_iq_sms'"); $has = $r && $r->num_rows > 0; }
-    if (!$has) return " LEFT JOIN (SELECT '' AS n, 0 AS sms_count, NULL AS sms_at FROM DUAL WHERE 1 = 0) sm ON sm.n = r.phone_norm";
-    return " LEFT JOIN (SELECT number_norm AS n, COUNT(*) AS sms_count, MAX(sent_at) AS sms_at FROM caller_iq_sms GROUP BY number_norm) sm ON sm.n = r.phone_norm";
+    static $has = null, $chan = false;
+    if ($has === null) {
+        $r = $conn->query("SHOW TABLES LIKE 'caller_iq_sms'");
+        $has = $r && $r->num_rows > 0;
+        if ($has) { $r = $conn->query("SHOW COLUMNS FROM caller_iq_sms LIKE 'channel'"); $chan = $r && $r->num_rows > 0; }
+    }
+    if (!$has) return " LEFT JOIN (SELECT '' AS n, 0 AS sms_count, NULL AS sms_at, 0 AS wa_count, NULL AS wa_at FROM DUAL WHERE 1 = 0) sm ON sm.n = r.phone_norm";
+    if (!$chan) return " LEFT JOIN (SELECT number_norm AS n, COUNT(*) AS sms_count, MAX(sent_at) AS sms_at, 0 AS wa_count, NULL AS wa_at
+                                    FROM caller_iq_sms GROUP BY number_norm) sm ON sm.n = r.phone_norm";
+    return " LEFT JOIN (SELECT number_norm AS n, SUM(channel <> 'whatsapp') AS sms_count, MAX(IF(channel <> 'whatsapp', sent_at, NULL)) AS sms_at,
+                               SUM(channel = 'whatsapp') AS wa_count, MAX(IF(channel = 'whatsapp', sent_at, NULL)) AS wa_at
+                        FROM caller_iq_sms GROUP BY number_norm) sm ON sm.n = r.phone_norm";
 }
 
 /** "Max attempts reached": the limit the app works to (its MAX_ATTEMPTS), 3 unless it says otherwise. */
@@ -177,14 +205,17 @@ function imp_recount(mysqli $conn, int $id, string $now): void
 }
 
 /** Per number over a set of imports' phones: what IMP_CALLED / IMP_STATUS read as s. */
-function imp_reach_sql(string $phones): string
+function imp_reach_sql(string $ids): string
 {
-    return "SELECT c.number_norm AS n, SUM(c.duration_sec > 0) AS connected, SUM(c.call_type = 'OUTGOING') AS outgoing,
-                   SUM(c.call_type IN ('MISSED','REJECTED','BLOCKED')) AS missed,
-                   SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(c.outcome, '') ORDER BY c.call_at DESC SEPARATOR '||'), '||', 1) AS last_tag
-            FROM caller_iq_calls c
-            WHERE " . IMP_HIDDEN . " AND c.number_norm IN ($phones)
-            GROUP BY c.number_norm";
+    /* Per list and number, counting only calls since that list was uploaded (see IMP_CALLED). */
+    return "SELECT ip.import_id, c.number_norm AS n, SUM(c.duration_sec > 0) AS conn_since, SUM(c.call_type = 'OUTGOING') AS attempts,
+                   SUM(c.call_type IN ('MISSED','REJECTED','BLOCKED')) AS missed_since,
+                   SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(c.outcome, '') ORDER BY c.call_at DESC SEPARATOR '||'), '||', 1) AS tag_since
+            FROM (SELECT DISTINCT r.import_id, r.phone_norm, i.created_at FROM caller_iq_import_rows r JOIN caller_iq_imports i ON i.id = r.import_id
+                  WHERE r.import_id IN ($ids) AND r.phone_norm <> '') ip
+            JOIN caller_iq_calls c ON c.number_norm = ip.phone_norm AND c.call_at >= ip.created_at
+            WHERE " . IMP_HIDDEN . "
+            GROUP BY ip.import_id, c.number_norm";
 }
 
 function imp_ensure_schema(mysqli $conn): void
@@ -236,7 +267,17 @@ function imp_ensure_schema(mysqli $conn): void
         'noted_at'  => "ADD COLUMN noted_at DATETIME NULL",
         'noted_by'  => "ADD COLUMN noted_by INT NULL",
         'import_status' => "ADD COLUMN import_status VARCHAR(20) NOT NULL DEFAULT ''",
+        /* pinned: a VIP kept above #1. lead_at / best_hour: when the lead first called us, from the
+           file's time column — the "best time to call" badge. inbound_missed: how many times this
+           number reached us as a missed call across lists ("Merge history" duplicates add up). */
+        'pinned'         => "ADD COLUMN pinned TINYINT(1) NOT NULL DEFAULT 0",
+        'lead_at'        => "ADD COLUMN lead_at DATETIME NULL",
+        'best_hour'      => "ADD COLUMN best_hour TINYINT NULL",
+        'inbound_missed' => "ADD COLUMN inbound_missed INT UNSIGNED NOT NULL DEFAULT 0",
+        /* assigned_to: the phone (device_id) this person was shared out to; '' = anyone. */
+        'assigned_to'    => "ADD COLUMN assigned_to VARCHAR(64) NOT NULL DEFAULT ''",
     ], [
+        'k_imp_assigned' => 'ADD KEY k_imp_assigned (import_id, assigned_to)',
         'k_imp_user' => 'ADD KEY k_imp_user (import_id, user_id)',
         'k_imp_caller' => 'ADD KEY k_imp_caller (import_id, called_by)',
         'k_phone' => 'ADD KEY k_phone (phone_norm)',
@@ -426,6 +467,9 @@ function imp_stats_sql(mysqli $conn, int $id, string $since, string $agent, stri
                    MAX(c.call_at) AS last_at,
                    COUNT(DISTINCT c.device_id) AS agents,
                    SUM(c.call_type = 'OUTGOING' AND c.call_at >= " . imp_e($conn, $created) . ") AS attempts,
+                   SUM(c.duration_sec > 0 AND c.call_at >= " . imp_e($conn, $created) . ") AS conn_since,
+                   SUM(c.call_type IN ('MISSED','REJECTED','BLOCKED') AND c.call_at >= " . imp_e($conn, $created) . ") AS missed_since,
+                   SUBSTRING_INDEX(GROUP_CONCAT(IF(c.call_at >= " . imp_e($conn, $created) . ", COALESCE(c.outcome, ''), NULL) ORDER BY c.call_at DESC SEPARATOR '||'), '||', 1) AS tag_since,
                    SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(c.outcome, '') ORDER BY c.call_at DESC SEPARATOR '||'), '||', 1) AS last_tag
             FROM caller_iq_calls c
             JOIN (SELECT DISTINCT phone_norm FROM caller_iq_import_rows WHERE import_id = $id AND phone_norm <> '') ip
@@ -434,7 +478,7 @@ function imp_stats_sql(mysqli $conn, int $id, string $since, string $agent, stri
             GROUP BY c.number_norm";
 }
 
-/** WHERE for the rows list: search + "show" bucket. */
+/** WHERE for the rows list: search + "show" bucket. Needs the s, p, sc and sm joins. */
 function imp_rows_where(mysqli $conn, int $id, array $in): string
 {
     $w = ["r.import_id = $id"];
@@ -451,20 +495,32 @@ function imp_rows_where(mysqli $conn, int $id, array $in): string
     /* "Called" = we rang them (or got through), or a counselor wrote their name in "Called by". */
     switch ((string)($in['show'] ?? 'all')) {
         case 'called':         $w[] = IMP_CALLED; break;
-        case 'connected':      $w[] = 's.connected > 0'; break;
-        case 'not_connected':  $w[] = 's.outgoing > 0 AND s.connected = 0'; break;
+        case 'connected':      $w[] = 's.conn_since > 0'; break;
+        case 'not_connected':  $w[] = 's.attempts > 0 AND s.conn_since = 0'; break;
         case 'never':          $w[] = 'NOT ' . IMP_CALLED; break;
         case 'no_phone':       $w[] = "r.phone_norm = ''"; break;
         case 'to_call':        $w[] = IMP_STATUS . ' IN ' . IMP_TO_CALL; break;
         case 'needs_callback': $w[] = IMP_STATUS . " IN ('needs_callback', 'missed_call')"; break;
         case 'scheduled':      $w[] = IMP_STATUS . " = 'scheduled'"; break;
         case 'maxed':          $w[] = 'COALESCE(s.attempts, 0) >= ' . imp_max_attempts($in); break;
+        case 'wa_sent':        $w[] = 'COALESCE(sm.wa_count, 0) > 0'; break;
+        case 'replied':        $w[] = 'cm.replied_at IS NOT NULL AND COALESCE(cm.dnd, 0) = 0'; break;
+        case 'converted':      $w[] = "(cm.stage = 'converted' OR p.u IS NOT NULL)"; break;
+        case 'review':         $w[] = "r.phone_raw <> '' AND (r.phone_norm = '' OR LENGTH(r.phone_norm) <> 10)"; break;
+        case 'ghosting':       $w[] = IMP_GHOSTING; break;
+        case 'dnd':            $w[] = 'cm.dnd = 1'; break;
+        case 'stage_new':      $w[] = "COALESCE(cm.stage, '') IN ('', 'new')"; break;
+        case 'stage_contacted': case 'stage_interested': case 'stage_qualified': case 'stage_converted': case 'stage_lost':
+            $w[] = 'cm.stage = ' . imp_e($conn, substr((string)$in['show'], 6)); break;
         case 'done':           $w[] = IMP_STATUS . ' IN ' . IMP_DONE; break;
     }
     switch ((string)($in['buy'] ?? '')) {
         case 'yes': $w[] = 'p.u IS NOT NULL'; break;
         case 'no':  $w[] = 'p.u IS NULL'; break;
     }
+    $assigned = (string)($in['assigned'] ?? '');
+    if ($assigned === '__none__') $w[] = "r.assigned_to = ''";
+    elseif ($assigned !== '') $w[] = 'r.assigned_to = ' . imp_e($conn, $assigned);
     $caller = (string)($in['caller'] ?? '');
     if ($caller === '__none__') $w[] = "r.called_by = ''";
     elseif ($caller !== '') $w[] = 'r.called_by = ' . imp_e($conn, $caller);
@@ -532,7 +588,7 @@ function imp_build_stats(mysqli $conn, int $id, string $since, string $agent, st
 
 function imp_num(array $r): array
 {
-    foreach (['total', 'outgoing', 'incoming', 'missed', 'connected', 'talk_sec', 'longest_sec', 'agents', 'attempts', 'sms_count', 'row_no', 'id', 'calls', 'people'] as $k) {
+    foreach (['total', 'outgoing', 'incoming', 'missed', 'connected', 'talk_sec', 'longest_sec', 'agents', 'attempts', 'sms_count', 'wa_count', 'pinned', 'best_hour', 'inbound_missed', 'bant', 'heat', 'dnd', 'row_no', 'id', 'calls', 'people'] as $k) {
         if (array_key_exists($k, $r) && $r[$k] !== null) $r[$k] = (int)$r[$k];
     }
     return $r;
@@ -562,7 +618,10 @@ case 'start': {
 case 'chunk': {
     $id = (int)($in['id'] ?? 0);
     $imp = imp_get($conn, $id);
-    if ($imp['status'] !== 'uploading') api_error('This import is already finished.');
+    /* append: new rows for a finished list (a Google Sheet synced from the app) — any number
+       already on this list is left out, whatever the duplicate mode. */
+    $append = !empty($in['append']);
+    if ($imp['status'] !== 'uploading' && !($append && $imp['status'] === 'ready')) api_error('This import is already finished.');
     $rows = is_array($in['rows'] ?? null) ? $in['rows'] : [];
     if (count($rows) > 10000) api_error('Send at most 10,000 rows per chunk.');
     $def  = in_array($imp['default_status'], IMP_IMPORT_STATUSES, true) ? $imp['default_status'] : '';
@@ -580,6 +639,8 @@ case 'chunk': {
             'row' => max(0, (int)($r['r'] ?? 0)), 'raw' => $raw, 'norm' => ciq_norm_number($raw), 'email' => $email,
             'name' => ciq_str($r['n'] ?? '', 190), 'data' => $data,
             'status' => imp_norm_status(ciq_str($r['s'] ?? '', 60), $def),
+            'lead_at' => ($ts = strtotime((string)($r['t'] ?? ''))) ? date('Y-m-d H:i:s', $ts) : null,
+            'hour' => isset($r['h']) && $r['h'] !== '' && (int)$r['h'] >= 0 && (int)$r['h'] <= 23 ? (int)$r['h'] : null,
         ];
     }
 
@@ -589,11 +650,15 @@ case 'chunk': {
     if ($phones && $mode !== 'keep') {
         foreach (array_chunk($phones, 1000) as $part) {
             $list = implode(',', array_map(fn($p) => imp_e($conn, $p), $part));
-            foreach (imp_all($conn, "SELECT import_id, phone_norm, called_by, comment, tags FROM caller_iq_import_rows
+            foreach (imp_all($conn, "SELECT import_id, phone_norm, called_by, comment, tags, inbound_missed FROM caller_iq_import_rows
                                      WHERE phone_norm IN ($list) ORDER BY id DESC") as $x) {
                 if ((int)$x['import_id'] === $id) $here[$x['phone_norm']] = true;
                 elseif (!isset($elsewhere[$x['phone_norm']]) || ($elsewhere[$x['phone_norm']]['called_by'] === '' && (string)$elsewhere[$x['phone_norm']]['comment'] === '' && $elsewhere[$x['phone_norm']]['tags'] === '')) {
+                    $prevMissed = (int)($elsewhere[$x['phone_norm']]['inbound_missed'] ?? 0);
                     $elsewhere[$x['phone_norm']] = $x;     // keep the newest row that has notes, if any
+                    $elsewhere[$x['phone_norm']]['inbound_missed'] = max($prevMissed, (int)$x['inbound_missed']);
+                } else {
+                    $elsewhere[$x['phone_norm']]['inbound_missed'] = max((int)$elsewhere[$x['phone_norm']]['inbound_missed'], (int)$x['inbound_missed']);
                 }
             }
         }
@@ -604,25 +669,36 @@ case 'chunk': {
         }
     }
 
+    if ($append && $phones) {
+        foreach (array_chunk($phones, 1000) as $part) {
+            $list = implode(',', array_map(fn($p) => imp_e($conn, $p), $part));
+            foreach (imp_all($conn, "SELECT DISTINCT phone_norm FROM caller_iq_import_rows WHERE import_id = $id AND phone_norm IN ($list)") as $x) $here[$x['phone_norm']] = 'list';
+        }
+    }
     $vals = []; $withPhone = 0; $skipped = 0; $dupes = 0; $overwrite = [];
     foreach ($clean as $c) {
         $norm = $c['norm'];
+        if ($append && ($norm === '' || ($here[$norm] ?? '') === 'list')) { $skipped++; continue; }
         $dupe = $norm !== '' && (isset($elsewhere[$norm]) || isset($here[$norm]));
         if ($dupe) $dupes++;
         if ($dupe && $mode === 'skip') { $skipped++; continue; }
-        if ($norm !== '') $here[$norm] = true;               // a number twice in the same file is a duplicate too
+        if ($norm !== '') $here[$norm] = $append ? 'list' : true;   // a number twice in the same file is a duplicate too
         $notes = $mode === 'merge' && $norm !== '' && !empty($elsewhere[$norm]) ? $elsewhere[$norm] : ['called_by' => '', 'comment' => null, 'tags' => ''];
+        /* "Merge history": the number reached us again — one more inbound missed call on top of the old count. */
+        $missedCount = $mode === 'merge' && $norm !== '' && !empty($elsewhere[$norm]) ? max(1, (int)($elsewhere[$norm]['inbound_missed'] ?? 0)) + 1 : 1;
         if ($mode === 'overwrite' && isset($elsewhere[$norm]) && $c['status'] !== '') $overwrite[$c['status']][] = $norm;
         if ($norm !== '') $withPhone++;
         $vals[] = '(' . $id . ',' . $c['row'] . ',' . imp_e($conn, $norm) . ',' . imp_e($conn, $c['raw']) . ','
             . imp_e($conn, $norm !== '' ? 'f' : '') . ',' . imp_e($conn, $c['email']) . ',' . imp_e($conn, $c['name']) . ','
             . ($c['data'] === null ? 'NULL' : imp_e($conn, $c['data'])) . ',' . imp_e($conn, $c['status']) . ','
-            . imp_e($conn, $notes['called_by']) . ',' . ($notes['comment'] === null ? 'NULL' : imp_e($conn, $notes['comment'])) . ',' . imp_e($conn, $notes['tags']) . ')';
+            . imp_e($conn, $notes['called_by']) . ',' . ($notes['comment'] === null ? 'NULL' : imp_e($conn, $notes['comment'])) . ',' . imp_e($conn, $notes['tags']) . ','
+            . ($c['lead_at'] === null ? 'NULL' : imp_e($conn, $c['lead_at'])) . ',' . ($c['hour'] === null ? ($c['lead_at'] === null ? 'NULL' : (int)date('G', strtotime($c['lead_at']))) : $c['hour']) . ','
+            . (in_array($c['status'], ['missed_call', 'needs_callback'], true) ? $missedCount : 0) . ')';
     }
     /* Multi-row INSERTs of 2,000 in one transaction: a 100k-row file is ~50 statements. */
     $conn->begin_transaction();
     foreach (array_chunk($vals, 2000) as $part) {
-        if (!$conn->query('INSERT INTO caller_iq_import_rows (import_id, row_no, phone_norm, phone_raw, phone_src, email, name, data_json, import_status, called_by, comment, tags) VALUES ' . implode(',', $part))) {
+        if (!$conn->query('INSERT INTO caller_iq_import_rows (import_id, row_no, phone_norm, phone_raw, phone_src, email, name, data_json, import_status, called_by, comment, tags, lead_at, best_hour, inbound_missed) VALUES ' . implode(',', $part))) {
             $err = $conn->error;
             $conn->rollback();
             api_error('Could not save rows: ' . $err, 500);
@@ -750,7 +826,7 @@ case 'list': {
         $idl = implode(',', $ids);
         /* Per import: called (we rang them, or a "Called by" name), connected, never called, purchased,
            plus the live status buckets every list's summary shows. */
-        foreach (imp_all($conn, "SELECT r.import_id, SUM(s.n IS NOT NULL) reached, SUM(COALESCE(s.connected, 0) > 0) connected,
+        foreach (imp_all($conn, "SELECT r.import_id, SUM(s.n IS NOT NULL) reached, SUM(COALESCE(s.conn_since, 0) > 0) connected,
                                         SUM(" . IMP_CALLED . ") called,
                                         SUM(NOT " . IMP_CALLED . ") never,
                                         SUM(r.called_by <> '') marked,
@@ -760,7 +836,7 @@ case 'list': {
                                         SUM(" . IMP_STATUS . " IN " . IMP_DONE . ") done,
                                         SUM(pu.u IS NOT NULL) purchased
                                  FROM caller_iq_import_rows r
-                                 LEFT JOIN (" . imp_reach_sql("SELECT phone_norm FROM caller_iq_import_rows WHERE import_id IN ($idl) AND phone_norm <> ''") . ") s ON s.n = r.phone_norm" . imp_sched_join($conn) . "
+                                 LEFT JOIN (" . imp_reach_sql($idl) . ") s ON s.n = r.phone_norm AND s.import_id = r.import_id" . imp_sched_join($conn) . "
                                  LEFT JOIN " . (imp_has_payments($conn)
                                      ? "(SELECT DISTINCT p.user_id u FROM payment_status p
                                          WHERE p.status = 'success' AND p.user_id IN (SELECT user_id FROM caller_iq_import_rows WHERE import_id IN ($idl) AND user_id > 0))"
@@ -791,7 +867,7 @@ case 'detail': {
     $agent = (string)($in['agent'] ?? '');
     if (!(int)$imp['users_resolved']) imp_resolve_users($conn, $id);
     $S = imp_build_stats($conn, $id, $since, $agent, $imp['created_at']);
-    $SC = imp_sched_join($conn);
+    $SC = imp_sched_join($conn) . imp_sms_join($conn) . crm_meta_join($conn);
     $P = imp_build_purchases($conn, $id);
 
     /* Headline numbers, counted over ROWS (one row = one person in the file). */
@@ -800,9 +876,9 @@ case 'detail': {
                                   SUM(r.phone_src = 'e') from_email,
                                   SUM(s.n IS NOT NULL) reached,
                                   SUM(" . IMP_CALLED . ") called,
-                                  SUM(r.called_by <> '' AND COALESCE(s.outgoing, 0) = 0 AND COALESCE(s.connected, 0) = 0) marked_only,
-                                  SUM(COALESCE(s.connected, 0) > 0) connected,
-                                  SUM(COALESCE(s.outgoing, 0) > 0 AND COALESCE(s.connected, 0) = 0) not_connected,
+                                  SUM(r.called_by <> '' AND COALESCE(s.attempts, 0) = 0 AND COALESCE(s.conn_since, 0) = 0) marked_only,
+                                  SUM(COALESCE(s.conn_since, 0) > 0) connected,
+                                  SUM(COALESCE(s.attempts, 0) > 0 AND COALESCE(s.conn_since, 0) = 0) not_connected,
                                   SUM(NOT " . IMP_CALLED . ") never,
                                   SUM(" . IMP_STATUS . " IN " . IMP_TO_CALL . ") to_call,
                                   SUM(" . IMP_STATUS . " IN ('needs_callback', 'missed_call')) needs_callback,
@@ -813,7 +889,13 @@ case 'detail': {
                                   SUM(p.u IS NOT NULL AND " . IMP_CALLED . ") purchased_called,
                                   SUM(r.user_id > 0) with_account,
                                   SUM(r.called_by <> '' OR r.comment <> '' OR r.tags <> '') noted,
-                                  SUM(COALESCE(s.attempts, 0) >= " . imp_max_attempts($in) . ") maxed
+                                  SUM(COALESCE(s.attempts, 0) >= " . imp_max_attempts($in) . ") maxed,
+                                  SUM(COALESCE(sm.wa_count, 0) > 0) wa_sent,
+                                  SUM(cm.replied_at IS NOT NULL AND COALESCE(cm.dnd, 0) = 0) wa_replied,
+                                  SUM(cm.stage = 'converted' OR p.u IS NOT NULL) converted,
+                                  SUM(r.phone_raw <> '' AND (r.phone_norm = '' OR LENGTH(r.phone_norm) <> 10)) review,
+                                  SUM(" . IMP_GHOSTING . ") ghosting,
+                                  SUM(cm.dnd = 1) dnd
                            FROM caller_iq_import_rows r LEFT JOIN $S s ON s.n = r.phone_norm LEFT JOIN $P p ON p.u = r.user_id$SC WHERE r.import_id = $id")[0];
     /* Call totals over DISTINCT numbers, so a person listed twice is not double counted. */
     $calls = imp_all($conn, "SELECT COUNT(*) numbers, COALESCE(SUM(total),0) calls, COALESCE(SUM(outgoing),0) outgoing, COALESCE(SUM(incoming),0) incoming,
@@ -835,16 +917,18 @@ case 'detail': {
     $dir = strtolower((string)($in['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC';
     /* Rows with no calls sort last whichever way a call column is sorted. */
     $order = in_array($sortKey, ['r.row_no', 'r.name', 'r.email'], true) ? "$sortKey $dir, r.row_no" : "($sortKey IS NULL), $sortKey $dir, r.row_no";
+    $order = "r.pinned DESC, $order";     // VIPs above #1
     $per = max(10, min(500, (int)($in['per_page'] ?? 50)));
     $page = max(1, (int)($in['page'] ?? 1));
     $off = ($page - 1) * $per;
     $total = (int)imp_all($conn, "SELECT COUNT(*) n FROM caller_iq_import_rows r LEFT JOIN $S s ON s.n = r.phone_norm LEFT JOIN $P p ON p.u = r.user_id$SC WHERE $where")[0]['n'];
     $rows = imp_all($conn, "SELECT r.id, r.row_no, r.phone_norm, r.phone_raw, r.phone_src, r.email, r.name, r.data_json, r.user_id,
                                    r.called_by, r.comment, r.tags, r.noted_at, r.noted_by, r.import_status, " . IMP_STATUS . " AS status,
-                                   s.attempts, sc.due_at AS callback_at, sm.sms_count, sm.sms_at,
+                                   s.attempts, sc.due_at AS callback_at, sm.sms_count, sm.sms_at, sm.wa_count, sm.wa_at,
+                                   r.pinned, r.lead_at, r.best_hour, r.inbound_missed, r.assigned_to, " . CRM_META_COLS . ",
                                    s.total, s.outgoing, s.incoming, s.missed, s.connected, s.talk_sec, s.longest_sec, s.first_at, s.last_at, s.agents,
                                    p.n AS bought, p.item AS bought_item, p.amount AS bought_amount, p.first_at AS bought_first, p.last_at AS bought_at
-                            FROM caller_iq_import_rows r LEFT JOIN $S s ON s.n = r.phone_norm LEFT JOIN $P p ON p.u = r.user_id$SC" . imp_sms_join($conn) . "
+                            FROM caller_iq_import_rows r LEFT JOIN $S s ON s.n = r.phone_norm LEFT JOIN $P p ON p.u = r.user_id$SC
                             WHERE $where ORDER BY $order LIMIT $per OFFSET $off");
     $details = imp_page_details($conn, array_column($rows, 'phone_norm'), $since, $agent);
     $noters = imp_user_names($conn, array_column($rows, 'noted_by'));
@@ -886,6 +970,24 @@ case 'detail': {
     ]);
 }
 
+/* Everyone a filter matches, as just enough to select, message or dial them. */
+case 'contacts': {
+    $id = (int)($in['id'] ?? 0);
+    $imp = imp_get($conn, $id);
+    $since = imp_since_sql($in, $imp);
+    $S = imp_build_stats($conn, $id, $since, (string)($in['agent'] ?? ''), $imp['created_at']);
+    $SC = imp_sched_join($conn) . imp_sms_join($conn) . crm_meta_join($conn);
+    $P = imp_build_purchases($conn, $id);
+    $where = imp_rows_where($conn, $id, $in);
+    $rows = imp_all($conn, "SELECT r.id, r.name, r.phone_norm, r.phone_raw, COALESCE(cm.dnd, 0) dnd
+                            FROM caller_iq_import_rows r LEFT JOIN $S s ON s.n = r.phone_norm LEFT JOIN $P p ON p.u = r.user_id$SC
+                            WHERE $where AND r.phone_norm <> '' ORDER BY r.pinned DESC, r.row_no LIMIT 5001");   /* list order: VIPs first */
+    $more = count($rows) > 5000;
+    $out = array_map(fn($r) => ['id' => (int)$r['id'], 'name' => (string)$r['name'], 'phone' => (string)$r['phone_norm'], 'phone_raw' => (string)$r['phone_raw'], 'dnd' => (int)$r['dnd']],
+        array_slice($rows, 0, 5000));
+    api_success(['contacts' => $out, 'total' => count($out), 'truncated' => $more]);
+}
+
 case 'export': {
     $id = (int)($in['id'] ?? 0);
     $imp = imp_get($conn, $id);
@@ -893,7 +995,7 @@ case 'export': {
     $agent = (string)($in['agent'] ?? '');
     if (!(int)$imp['users_resolved']) imp_resolve_users($conn, $id);
     $S = imp_build_stats($conn, $id, $since, $agent, $imp['created_at']);
-    $SC = imp_sched_join($conn);
+    $SC = imp_sched_join($conn) . imp_sms_join($conn) . crm_meta_join($conn);
     $P = imp_build_purchases($conn, $id);
     $where = imp_rows_where($conn, $id, $in);
     $headers = json_decode($imp['headers_json'] ?: '[]', true) ?: [];
@@ -1028,6 +1130,159 @@ case 'bulk': {
             api_error('Unknown bulk action.');
     }
     api_success(['changed' => $changed], 'Done');
+}
+
+/* ── one person: name, number, status; VIP pin ─────────────────────────── */
+case 'edit_row': {
+    $id = (int)($in['id'] ?? 0);
+    imp_get($conn, $id);
+    $rowId = (int)($in['row_id'] ?? 0);
+    $set = [];
+    if (isset($in['name'])) $set[] = 'name = ' . imp_e($conn, ciq_str($in['name'], 190));
+    if (isset($in['phone'])) {
+        $raw = ciq_str($in['phone'], 40);
+        $set[] = 'phone_raw = ' . imp_e($conn, $raw);
+        $set[] = 'phone_norm = ' . imp_e($conn, ciq_norm_number($raw));
+        $set[] = "phone_src = " . imp_e($conn, ciq_norm_number($raw) !== '' ? 'f' : '');
+    }
+    if (isset($in['status'])) {
+        if (!in_array((string)$in['status'], IMP_IMPORT_STATUSES, true)) api_error('Pick a status.');
+        $set[] = 'import_status = ' . imp_e($conn, (string)$in['status']);
+    }
+    if (!$set) api_error('Nothing to change.');
+    $conn->query("UPDATE caller_iq_import_rows SET " . implode(', ', $set) . " WHERE id = $rowId AND import_id = $id");
+    if ($conn->errno) api_error('Could not save: ' . $conn->error, 500);
+    $now = date('Y-m-d H:i:s');
+    if (isset($in['phone'])) imp_recount($conn, $id, $now);
+    $conn->query("UPDATE caller_iq_imports SET changed_at = '$now' WHERE id = $id");
+    $row = imp_all($conn, "SELECT id, name, phone_raw, phone_norm, import_status FROM caller_iq_import_rows WHERE id = $rowId AND import_id = $id");
+    if (!$row) api_error('That person is no longer on this list.', 404);
+    api_success(['row' => imp_num($row[0])], 'Saved');
+}
+
+case 'pin': {
+    $id = (int)($in['id'] ?? 0);
+    imp_get($conn, $id);
+    $rowId = (int)($in['row_id'] ?? 0);
+    $pin = !empty($in['pinned']) ? 1 : 0;
+    $conn->query("UPDATE caller_iq_import_rows SET pinned = $pin WHERE id = $rowId AND import_id = $id");
+    $conn->query("UPDATE caller_iq_imports SET changed_at = '" . date('Y-m-d H:i:s') . "' WHERE id = $id");
+    api_success(['pinned' => $pin], $pin ? 'Pinned' : 'Unpinned');
+}
+
+/* ── merge two lists into one, or split one into batches ───────────────── */
+case 'merge_lists': {
+    $id = (int)($in['id'] ?? 0);
+    $to = (int)($in['into_id'] ?? 0);
+    if ($id === $to) api_error('Pick another list to merge into.');
+    $src = imp_get($conn, $id);
+    $dest = imp_get($conn, $to);
+    if ($src['status'] !== 'ready' || $dest['status'] !== 'ready') api_error('Both lists must have finished uploading.');
+    $now = date('Y-m-d H:i:s');
+    $base = (int)imp_all($conn, "SELECT COALESCE(MAX(row_no), 0) m FROM caller_iq_import_rows WHERE import_id = $to")[0]['m'];
+    $conn->begin_transaction();
+    /* A number already on the target list: its notes carry over if the target has none, its missed
+       count adds up, and the duplicate row goes. */
+    $dupes = imp_all($conn, "SELECT s.id sid, d.id did, s.called_by, s.comment, s.tags, s.inbound_missed
+                             FROM caller_iq_import_rows s JOIN caller_iq_import_rows d ON d.phone_norm = s.phone_norm AND d.import_id = $to
+                             WHERE s.import_id = $id AND s.phone_norm <> '' GROUP BY s.id");
+    foreach ($dupes as $d) {
+        $conn->query("UPDATE caller_iq_import_rows SET inbound_missed = inbound_missed + " . (int)$d['inbound_missed'] . ",
+                        called_by = IF(called_by = '', " . imp_e($conn, $d['called_by']) . ", called_by),
+                        comment = IF(COALESCE(comment, '') = '', " . ($d['comment'] === null ? 'comment' : imp_e($conn, $d['comment'])) . ", comment),
+                        tags = IF(tags = '', " . imp_e($conn, $d['tags']) . ", tags)
+                      WHERE id = " . (int)$d['did']);
+    }
+    if ($dupes) $conn->query("DELETE FROM caller_iq_import_rows WHERE id IN (" . implode(',', array_map(fn($d) => (int)$d['sid'], $dupes)) . ")");
+    /* The same number twice on the source list: keep its first row. */
+    $conn->query("DELETE r FROM caller_iq_import_rows r JOIN caller_iq_import_rows k ON k.import_id = $id AND k.phone_norm = r.phone_norm AND k.id < r.id
+                  WHERE r.import_id = $id AND r.phone_norm <> ''");
+    $conn->query("SET @n := $base");
+    $conn->query("UPDATE caller_iq_import_rows SET import_id = $to, row_no = (@n := @n + 1) WHERE import_id = $id ORDER BY row_no");
+    $moved = $conn->affected_rows;
+    $conn->query("DELETE FROM caller_iq_imports WHERE id = $id");
+    imp_recount($conn, $to, $now);
+    $conn->commit();
+    api_success(['moved' => $moved, 'merged_duplicates' => count($dupes), 'into_id' => $to], 'Lists merged');
+}
+
+case 'split_list': {
+    $id = (int)($in['id'] ?? 0);
+    $imp = imp_get($conn, $id);
+    if ($imp['status'] !== 'ready') api_error('This list is still uploading.');
+    $size = max(5, min(5000, (int)($in['size'] ?? 50)));
+    $ids = array_map('intval', array_column(imp_all($conn, "SELECT id FROM caller_iq_import_rows WHERE import_id = $id ORDER BY pinned DESC, row_no"), 'id'));
+    if (count($ids) <= $size) api_error("This list has $size people or fewer already.");
+    $batches = array_chunk($ids, $size);
+    $now = date('Y-m-d H:i:s');
+    $made = [];
+    $conn->begin_transaction();
+    foreach (array_slice($batches, 1) as $i => $part) {
+        $name = mb_substr($imp['name'], 0, 140) . ' · batch ' . ($i + 2);
+        $st = $conn->prepare("INSERT INTO caller_iq_imports (name, file_name, headers_json, mapping_json, total_rows, created_by, created_at, default_status, dupe_mode, status, finished_at)
+                              VALUES (?,?,?,?,?,?,?,?,?,'ready',?)");
+        $total = count($part);
+        $created = $imp['created_at'];   // the same upload time, so attempts and status still count from it
+        $st->bind_param('ssssiissss', $name, $imp['file_name'], $imp['headers_json'], $imp['mapping_json'], $total, $ME, $created, $imp['default_status'], $imp['dupe_mode'], $now);
+        $st->execute();
+        $newId = (int)$st->insert_id;
+        $st->close();
+        $conn->query("SET @n := 0");
+        $conn->query("UPDATE caller_iq_import_rows SET import_id = $newId, row_no = (@n := @n + 1) WHERE id IN (" . implode(',', $part) . ") ORDER BY pinned DESC, row_no");
+        $conn->query("UPDATE caller_iq_imports SET users_resolved = 1 WHERE id = $newId");
+        imp_recount($conn, $newId, $now);
+        $made[] = ['id' => $newId, 'name' => $name, 'people' => $total];
+    }
+    $conn->query("SET @n := 0");
+    $conn->query("UPDATE caller_iq_import_rows SET row_no = (@n := @n + 1) WHERE import_id = $id ORDER BY pinned DESC, row_no");
+    $conn->query("UPDATE caller_iq_imports SET name = " . imp_e($conn, mb_substr($imp['name'], 0, 140) . ' · batch 1') . " WHERE id = $id");
+    imp_recount($conn, $id, $now);
+    $conn->commit();
+    api_success(['lists' => $made, 'kept' => count($batches[0])], 'List split');
+}
+
+/* ── the team, and sharing people out between them ────────────────────── */
+case 'agents': {
+    $r = $conn->query("SHOW TABLES LIKE 'caller_iq_devices'");
+    $rows = $r && $r->num_rows ? imp_all($conn, "SELECT device_id, COALESCE(NULLIF(agent_name, ''), device_id) name, team FROM caller_iq_devices
+                                                 WHERE COALESCE(is_hidden, 0) = 0 ORDER BY name") : [];
+    api_success(['agents' => $rows]);
+}
+
+case 'assign': {
+    $id = (int)($in['id'] ?? 0);
+    imp_get($conn, $id);
+    $agents = array_values(array_unique(array_filter(array_map(fn($a) => ciq_str($a, 64), (array)($in['agents'] ?? [])), fn($a) => $a !== '')));
+    $clear = !empty($in['clear']);
+    if (!$agents && !$clear) api_error('Pick at least one person to share them out to.');
+    if (!empty($in['all'])) {
+        /* Everyone this filter shows (or the whole list), in list order. */
+        $S = imp_build_stats($conn, $id, '', '', imp_get($conn, $id)['created_at']);
+        $SC = imp_sched_join($conn) . imp_sms_join($conn) . crm_meta_join($conn);
+        $P = imp_build_purchases($conn, $id);
+        $ids = array_map('intval', array_column(imp_all($conn, "SELECT r.id FROM caller_iq_import_rows r LEFT JOIN $S s ON s.n = r.phone_norm LEFT JOIN $P p ON p.u = r.user_id$SC
+                                                               WHERE " . imp_rows_where($conn, $id, $in) . " ORDER BY r.pinned DESC, r.row_no"), 'id'));
+    } else {
+        $ids = array_values(array_unique(array_filter(array_map('intval', (array)($in['row_ids'] ?? [])))));
+    }
+    if (!$ids) api_error('Nobody to assign.');
+    if (count($ids) > 20000) api_error('At most 20,000 people at a time.');
+    $per = [];
+    if ($clear) {
+        $conn->query("UPDATE caller_iq_import_rows SET assigned_to = '' WHERE import_id = $id AND id IN (" . implode(',', $ids) . ")");
+    } else {
+        /* Round robin: 1st to the first agent, 2nd to the second… so the shares differ by one at most. */
+        $groups = [];
+        foreach ($ids as $i => $rowId) $groups[$agents[$i % count($agents)]][] = $rowId;
+        foreach ($groups as $agent => $part) {
+            foreach (array_chunk($part, 2000) as $chunk) {
+                $conn->query("UPDATE caller_iq_import_rows SET assigned_to = " . imp_e($conn, $agent) . " WHERE import_id = $id AND id IN (" . implode(',', $chunk) . ")");
+            }
+            $per[$agent] = count($part);
+        }
+    }
+    $conn->query("UPDATE caller_iq_imports SET changed_at = '" . date('Y-m-d H:i:s') . "' WHERE id = $id");
+    api_success(['assigned' => count($ids), 'per_agent' => (object)$per], $clear ? 'Unassigned' : 'Shared out');
 }
 
 case 'rename': {

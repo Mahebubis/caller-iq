@@ -3,6 +3,7 @@ import { Linking, NativeModules, Pressable, Text, View } from 'react-native';
 import { makeStyles, radius, space, useTheme } from '../theme';
 import { prettyPhone } from '../format';
 import { SmsTarget } from '../types';
+import { OFFER } from '../sales';
 import { Button, Chip, ChipBar, Field, IconButton, Sheet } from '../ui';
 
 const { CallBridge } = NativeModules;
@@ -25,7 +26,7 @@ const DEFAULT_TEMPLATES: Template[] = [
 
 const fill = (text: string, target: SmsTarget, me: string) => text
   .replace(/\[Name\]/gi, (target.name || '').trim().split(/\s+/)[0] || 'there')
-  .replace(/\[Segment\]/gi, target.segment || 'your enquiry')
+  .replace(/\[Segment\]/gi, OFFER)
   .replace(/\[Me\]/gi, me || 'our team');
 
 export default function SmsSheet({ target, myName, onSent, onClose }: {

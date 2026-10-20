@@ -105,6 +105,7 @@ object CallPopupNotifier {
                 Notification.Builder(app, CHANNEL_ID) else @Suppress("DEPRECATION") Notification.Builder(app)
 
             builder.setSmallIcon(android.R.drawable.sym_action_call)
+                .setColor(CallPopupView.ACCENT)   // sunset coral, as in the app
                 .setContentTitle(title)
                 // Says why this is a notification and not the popup, because the fix is one tap away.
                 .setContentText("$meta — tap to tag · allow “Display over other apps” for the instant popup")
@@ -260,6 +261,7 @@ object CallbackReminders {
 
             val builder = NotificationCompat.Builder(ctx, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.sym_action_call)
+                .setColor(CallPopupView.ACCENT)   // sunset coral, as in the app
                 .setContentTitle(title)
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))

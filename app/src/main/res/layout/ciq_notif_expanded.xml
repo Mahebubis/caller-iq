@@ -61,6 +61,6 @@
         android:gravity="center"
         android:textSize="12sp"
         android:textStyle="bold"
-        android:textColor="#6366F1"
+        android:textColor="#DE2F3C"
         android:text="@string/ciq_open_full_popup" />
 </LinearLayout>

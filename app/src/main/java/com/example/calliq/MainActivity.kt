@@ -2,6 +2,7 @@ package com.example.calliq
 
 import android.content.res.Configuration
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.View
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -46,6 +47,26 @@ class MainActivity : ReactActivity() {
             v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
             WindowInsetsCompat.CONSUMED
         }
+    }
+
+    /*
+     * Hardware keyboard (a tablet or a phone with a Bluetooth keyboard): every key-up also goes to
+     * JS as a "CallIQKey" event for the shortcuts — Space dial, W WhatsApp, N next, 1-5 outcome,
+     * Ctrl+K search, Ctrl+Z undo. Nothing is consumed, so typing into a text box is untouched; JS
+     * ignores keys while one has focus.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_UP && event.keyCode != KeyEvent.KEYCODE_BACK) {
+            val ch = event.unicodeChar.takeIf { it > 0 }?.toChar()?.toString()?.lowercase()
+            val key = when (event.keyCode) {
+                KeyEvent.KEYCODE_SPACE -> "space"
+                KeyEvent.KEYCODE_ESCAPE -> "escape"
+                KeyEvent.KEYCODE_ENTER -> "enter"
+                else -> if (event.isCtrlPressed) KeyEvent.keyCodeToString(event.keyCode).removePrefix("KEYCODE_").lowercase() else ch
+            }
+            if (!key.isNullOrBlank()) CrmBridgeModule.emitKey(key, event.isCtrlPressed, event.isShiftPressed)
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onResume() {

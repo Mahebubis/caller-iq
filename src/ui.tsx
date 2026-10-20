@@ -10,17 +10,20 @@ import {
   PressableProps,
   ScrollView,
   StyleProp,
+  StyleSheet,
   Text,
   TextInput,
   TextStyle,
   View,
   ViewStyle,
 } from 'react-native';
-import { makeStyles, radius, space, type, useTheme } from './theme';
+import { elevation, glow, makeStyles, radius, space, type, useTheme } from './theme';
+import { Gradient, Leaves } from './art';
 
 /*
  * The building blocks every screen is made of, so a button, a card or a search box looks and
- * behaves the same everywhere.
+ * behaves the same everywhere — in the Sunset Coral style: white cards with a warm shadow, blush
+ * inputs and pills, and the coral gradient (with its glow) on whatever is primary or selected.
  */
 
 /* ── Icons ──────────────────────────────────────────────────────────────────
@@ -38,6 +41,8 @@ const GLYPHS = {
   call_made: 0xe0b2,
   call_missed: 0xe0b4,
   call_received: 0xe0b5,
+  campaign: 0xef49,
+  chat: 0xe0b7,
   chat_bubble_outline: 0xe0cb,
   check: 0xe5ca,
   check_box: 0xe834,
@@ -64,6 +69,7 @@ const GLYPHS = {
   inbox: 0xe156,
   info_outline: 0xe88f,
   insights: 0xf092,
+  link_off: 0xe16f,
   light_mode: 0xe518,
   lock: 0xe897,
   lock_open: 0xe898,
@@ -77,12 +83,15 @@ const GLYPHS = {
   phone_in_talk: 0xe61d,
   phone_missed: 0xe61f,
   play_arrow: 0xe037,
+  qr_code: 0xef6b,
   refresh: 0xe5d5,
+  remove: 0xe15b,
   restart_alt: 0xf053,
   schedule: 0xe8b5,
   search: 0xe8b6,
   select_all: 0xe162,
   sell: 0xf05b,
+  send: 0xe163,
   settings: 0xe8b8,
   shopping_bag: 0xf1cc,
   sim_card: 0xe32b,
@@ -102,6 +111,32 @@ const GLYPHS = {
   visibility_off: 0xe8f5,
   warning_amber: 0xf083,
   wifi_off: 0xe648,
+  bar_chart: 0xe26b,
+  call_split: 0xe0b6,
+  chevron_left: 0xe5cb,
+  content_cut: 0xe14e,
+  download: 0xf090,
+  emoji_events: 0xea23,
+  leaderboard: 0xf20c,
+  local_fire_department: 0xef55,
+  merge_type: 0xe252,
+  mic: 0xe029,
+  more_vert: 0xe5d4,
+  star: 0xe838,
+  star_border: 0xe83a,
+  undo: 0xe166,
+  upload_file: 0xe9fc,
+  view_kanban: 0xeb7f,
+  view_list: 0xe8ef,
+  fiber_manual_record: 0xe061,
+  volume_up: 0xe050,
+  dialpad: 0xe0bc,
+  mic_off: 0xe02b,
+  home: 0xe88a,
+  palette: 0xe40a,
+  text_fields: 0xe262,
+  layers: 0xe53b,
+  expand_more: 0xe5cf,
 };
 export type IconName = keyof typeof GLYPHS;
 
@@ -225,6 +260,8 @@ export const Appear = ({ index = 0, children, style }: { index?: number; childre
 
 /* ── Buttons ── */
 
+const BTN_RADIUS = 14;
+
 type Variant = 'primary' | 'success' | 'secondary' | 'soft' | 'ghost' | 'danger';
 
 export const Button = ({
@@ -265,15 +302,22 @@ export const Button = ({
         s.btn,
         size === 'sm' ? s.btnSm : size === 'lg' ? s.btnLg : s.btnMd,
         pill && { borderRadius: radius.pill },
-        variant === 'primary' && { backgroundColor: pressed ? t.c.primaryPressed : t.c.primary },
-        variant === 'success' && { backgroundColor: t.c.emerald },
-        variant === 'danger' && { backgroundColor: t.c.coral },
+        variant === 'primary' && !off && glow(t),
         variant === 'secondary' && s.btnSecondary,
         variant === 'soft' && { backgroundColor: t.c.primarySoft },
+        pressed && filled && { opacity: 0.92 },
         off && { opacity: 0.5 },
         style,
       ]}
     >
+      {filled && (
+        <Gradient
+          colors={variant === 'success' ? t.grad.tiles.start : variant === 'danger' ? ['#FB7185', '#F43F5E', '#E11D48'] : t.grad.primary}
+          corner={pill ? 999 : BTN_RADIUS}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+      )}
       {loading ? (
         <ActivityIndicator size="small" color={fg} />
       ) : (
@@ -503,11 +547,12 @@ export const Chip = memo(({ label, count, selected, onPress, icon }: { label: st
       accessibilityState={{ selected: !!selected }}
       style={[s.chip, selected && s.chipOn]}
     >
-      {icon && <Icon name={icon} size={16} color={selected ? t.c.link : t.c.muted} />}
-      <Text style={[s.chipText, selected && { color: t.c.link }]}>{label}</Text>
+      {selected && <Gradient colors={t.grad.primary} corner={999} style={StyleSheet.absoluteFill} pointerEvents="none" />}
+      {icon && <Icon name={icon} size={16} color={selected ? '#FFFFFF' : t.c.muted} />}
+      <Text style={[s.chipText, selected && { color: '#FFFFFF' }]}>{label}</Text>
       {count != null && (
-        <View style={[s.chipCount, selected && { backgroundColor: t.c.primary }]}>
-          <Text style={[s.chipCountText, selected && { color: t.c.onPrimary }]}>{count > 9999 ? '9999+' : count}</Text>
+        <View style={[s.chipCount, selected && { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
+          <Text style={[s.chipCountText, selected && { color: '#FFFFFF' }]}>{count > 9999 ? '9999+' : count}</Text>
         </View>
       )}
     </Tactile>
@@ -543,11 +588,45 @@ export function Segmented<K extends string>({ options, value, onChange, style }:
             accessibilityState={{ selected: on }}
             style={[s.segBtn, on && s.segOn]}
           >
-            {o.icon && <Icon name={o.icon} size={16} color={on ? t.c.link : t.c.muted} />}
-            <Text style={[s.segText, on && { color: t.c.link, fontWeight: '700' }]} numberOfLines={1}>{o.label}</Text>
+            {on && <Gradient colors={t.grad.primary} corner={999} style={StyleSheet.absoluteFill} pointerEvents="none" />}
+            {o.icon && <Icon name={o.icon} size={16} color={on ? '#FFFFFF' : t.c.muted} />}
+            <Text style={[s.segText, on && { color: '#FFFFFF', fontWeight: '700' }]} numberOfLines={1}>{o.label}</Text>
           </Pressable>
         );
       })}
+    </View>
+  );
+}
+
+/** A dropdown: the current choice in a blush field; tapping it lists the options underneath. */
+export function Select<K extends string | number>({ label, value, options, onChange }: {
+  label: string;
+  value: K;
+  options: ReadonlyArray<{ key: K; label: string }>;
+  onChange: (k: K) => void;
+}) {
+  const t = useTheme();
+  const s = useStyles();
+  const [open, setOpen] = useState(false);
+  const cur = options.find((o) => o.key === value);
+  return (
+    <View style={{ marginTop: space.sm }}>
+      <Pressable onPress={() => setOpen(!open)} accessibilityRole="button" accessibilityState={{ expanded: open }} accessibilityLabel={`${label}: ${cur?.label || 'none'}`} style={s.select}>
+        <Text style={s.selectLabel} numberOfLines={1}>{label}</Text>
+        <Icon name="arrow_back" size={14} color={t.c.faint} style={{ transform: [{ rotate: '180deg' }] }} />
+        <Text style={s.selectValue} numberOfLines={1}>{cur?.label || '—'}</Text>
+        <Icon name="expand_more" size={20} color={t.c.muted} style={open ? { transform: [{ rotate: '180deg' }] } : undefined} />
+      </Pressable>
+      {open && (
+        <View style={s.selectList}>
+          {options.map((o) => (
+            <Pressable key={String(o.key)} onPress={() => { onChange(o.key); setOpen(false); }} style={({ pressed }) => [s.selectOpt, pressed && { backgroundColor: t.c.primarySoft }]} accessibilityRole="radio" accessibilityState={{ selected: o.key === value }}>
+              <Text style={[s.selectOptText, o.key === value && { color: t.c.link, fontWeight: '800' }]} numberOfLines={1}>{o.label}</Text>
+              {o.key === value && <Icon name="check" size={18} color={t.c.link} />}
+            </Pressable>
+          ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -674,9 +753,12 @@ export const SkeletonCard = ({ lines = 3 }: { lines?: number }) => {
 export const ProgressBar = ({ value, color }: { value: number; color?: string }) => {
   const t = useTheme();
   const pct = Math.max(0, Math.min(1, value || 0)) * 100;
+  // The accent bar is the coral gradient; a status colour stays solid.
   return (
-    <View style={{ height: 6, borderRadius: 3, backgroundColor: t.c.divider, overflow: 'hidden' }}>
-      <View style={{ height: 6, borderRadius: 3, width: `${pct}%`, backgroundColor: color || t.c.primary }} />
+    <View style={{ height: 8, borderRadius: 4, backgroundColor: t.c.surfaceAlt, overflow: 'hidden' }}>
+      {color
+        ? <View style={{ height: 8, borderRadius: 4, width: `${pct}%`, backgroundColor: color }} />
+        : pct > 0 && <Gradient colors={t.grad.primary} corner={4} style={{ height: 8, width: `${pct}%` }} />}
     </View>
   );
 };
@@ -698,6 +780,7 @@ export const Sheet = ({ visible, onClose, title, subtitle, children, footer, scr
       <View style={s.scrim}>
         <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" accessibilityRole="button" />
         <View style={s.sheet}>
+          <Leaves spot="bottom" />
           <View style={s.grabber} />
           <View style={s.sheetHead}>
             <View style={{ flex: 1 }}>
@@ -786,12 +869,12 @@ export const ToastProvider = ({ children }: { children: React.ReactNode }) => {
 /* ── styles ── */
 
 const useStyles = makeStyles((t) => ({
-  btn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: radius.md, overflow: 'hidden' },
+  btn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: BTN_RADIUS },
   btnSm: { minHeight: 36, paddingHorizontal: 14 },
   btnMd: { minHeight: 44, paddingHorizontal: 18 },
   btnLg: { minHeight: 52, paddingHorizontal: 22 },
-  btnSecondary: { backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.borderStrong },
-  btnText: { fontSize: 14.5, fontWeight: '600' },
+  btnSecondary: { backgroundColor: t.c.input },
+  btnText: { fontSize: 14.5, fontWeight: '700' },
   btnTextSm: { fontSize: 13 },
   btnTextFilled: { fontWeight: '700' },
 
@@ -802,19 +885,18 @@ const useStyles = makeStyles((t) => ({
   badgeText: { color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' },
 
   card: {
-    backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: t.c.border,
-    padding: space.lg, marginBottom: space.md,
+    backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginBottom: space.md, ...elevation(t),
   },
 
-  metric: { flex: 1, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.border, borderRadius: radius.lg, padding: 12 },
+  metric: { flex: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, padding: 14, ...elevation(t) },
   metricTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  metricIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  metricIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   metricValue: { ...type.metric, color: t.c.text, marginTop: 12 },
   metricLabel: { fontSize: 12, fontWeight: '600', color: t.c.muted, marginTop: 1 },
   metricSub: { fontSize: 11.5, color: t.c.faint, marginTop: 2 },
 
-  index: { minWidth: 34, height: 22, paddingHorizontal: 6, borderRadius: 7, backgroundColor: t.c.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
-  indexText: { fontSize: 11.5, fontWeight: '800', color: t.c.textSoft, fontVariant: ['tabular-nums'] },
+  index: { minWidth: 34, height: 22, paddingHorizontal: 6, borderRadius: 8, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  indexText: { fontSize: 11.5, fontWeight: '800', color: t.c.link, fontVariant: ['tabular-nums'] },
 
   pill: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: radius.pill, paddingHorizontal: 9, paddingVertical: 4, alignSelf: 'flex-start', maxWidth: '100%' },
   pillDot: { width: 6, height: 6, borderRadius: 3 },
@@ -825,48 +907,54 @@ const useStyles = makeStyles((t) => ({
   sectionAction: { fontSize: 13, fontWeight: '600', color: t.c.link },
 
   search: {
-    flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.border,
-    borderRadius: radius.pill, paddingLeft: 14, paddingRight: 4, height: 46, marginBottom: space.md,
+    flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: t.c.input,
+    borderRadius: radius.pill, paddingLeft: 16, paddingRight: 4, height: 48, marginBottom: space.md,
   },
   searchInput: { flex: 1, fontSize: 14.5, color: t.c.text, paddingVertical: 0 },
 
   fieldLabel: { ...type.label, color: t.c.textSoft, marginBottom: 6 },
   fieldHint: { fontSize: 12, color: t.c.muted, marginTop: 6, lineHeight: 17 },
   input: {
-    borderWidth: 1, borderColor: t.c.border, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 11,
-    fontSize: 14.5, color: t.c.text, backgroundColor: t.c.surfaceAlt,
+    borderWidth: 1, borderColor: t.c.input, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12,
+    fontSize: 14.5, color: t.c.text, backgroundColor: t.c.input,
   },
 
   chipBar: { gap: 8, paddingBottom: space.md, paddingRight: space.lg },
   chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: t.c.border, backgroundColor: t.c.surface,
-    borderRadius: radius.pill, paddingLeft: 12, paddingRight: 8, minHeight: 36,
+    flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.input,
+    borderRadius: radius.pill, paddingLeft: 14, paddingRight: 10, minHeight: 36,
   },
-  chipOn: { borderColor: t.c.primaryLine, backgroundColor: t.c.primarySoft },
+  chipOn: { backgroundColor: t.c.primary, ...glow(t), elevation: 4 },
   chipText: { fontSize: 13, color: t.c.textSoft, fontWeight: '600', paddingRight: 4 },
-  chipCount: { minWidth: 22, height: 20, borderRadius: 10, paddingHorizontal: 6, backgroundColor: t.c.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  chipCount: { minWidth: 22, height: 20, borderRadius: 10, paddingHorizontal: 6, backgroundColor: t.c.surface, alignItems: 'center', justifyContent: 'center' },
   chipCountText: { fontSize: 11.5, fontWeight: '700', color: t.c.textSoft },
 
-  segment: { flexDirection: 'row', backgroundColor: t.c.surfaceAlt, borderRadius: radius.md, padding: 3, marginBottom: space.md },
-  segBtn: { flex: 1, flexDirection: 'row', gap: 6, minHeight: 38, borderRadius: radius.sm + 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, borderWidth: 1, borderColor: 'transparent' },
-  segOn: { backgroundColor: t.c.surface, borderColor: t.c.border },
+  segment: { flexDirection: 'row', backgroundColor: t.c.input, borderRadius: radius.pill, padding: 4, marginBottom: space.md },
+  segBtn: { flex: 1, flexDirection: 'row', gap: 6, minHeight: 38, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  segOn: { ...glow(t), elevation: 4, backgroundColor: t.c.primary },
   segText: { fontSize: 13, fontWeight: '600', color: t.c.muted },
+  select: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: t.c.input, borderRadius: 14, paddingHorizontal: 14, minHeight: 48 },
+  selectLabel: { fontSize: 13.5, fontWeight: '700', color: t.c.text, maxWidth: '40%' },
+  selectValue: { flex: 1, fontSize: 13.5, fontWeight: '600', color: t.c.link },
+  selectList: { backgroundColor: t.c.surface, borderRadius: 14, borderWidth: 1, borderColor: t.c.border, marginTop: 4, paddingVertical: 4, ...elevation(t) },
+  selectOpt: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 11, gap: 8 },
+  selectOptText: { flex: 1, fontSize: 14, color: t.c.textSoft, fontWeight: '600' },
 
   empty: { alignItems: 'center', paddingVertical: 44, paddingHorizontal: 28 },
-  emptyIcon: { width: 72, height: 72, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginBottom: space.lg },
+  emptyIcon: { width: 76, height: 76, borderRadius: 26, alignItems: 'center', justifyContent: 'center', marginBottom: space.lg },
   emptyTitle: { ...type.heading, color: t.c.text, textAlign: 'center' },
   emptyBody: { ...type.caption, color: t.c.muted, textAlign: 'center', marginTop: 6, maxWidth: 320 },
 
-  banner: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: radius.md, padding: 14, marginBottom: space.md },
+  banner: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: radius.lg, padding: 14, marginBottom: space.md },
   bannerTitle: { fontSize: 14, fontWeight: '700', marginBottom: 2 },
   bannerText: { fontSize: 12.5, color: t.c.textSoft, lineHeight: 18 },
-  bannerBtn: { borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: 12, minHeight: 32, justifyContent: 'center', alignSelf: 'center' },
+  bannerBtn: { borderWidth: 1.5, borderRadius: radius.pill, paddingHorizontal: 14, minHeight: 32, justifyContent: 'center', alignSelf: 'center' },
   bannerBtnText: { fontSize: 12.5, fontWeight: '700' },
 
   scrim: { flex: 1, backgroundColor: t.c.scrim, justifyContent: 'flex-end' },
   sheet: {
-    backgroundColor: t.c.surface, borderTopLeftRadius: radius.xl + 4, borderTopRightRadius: radius.xl + 4,
-    paddingHorizontal: space.xl, paddingBottom: space.xxl, maxHeight: '92%',
+    backgroundColor: t.c.surface, borderTopLeftRadius: radius.xxl + 4, borderTopRightRadius: radius.xxl + 4,
+    paddingHorizontal: space.xl, paddingBottom: space.xxl, maxHeight: '92%', overflow: 'hidden',
   },
   grabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: t.c.borderStrong, marginTop: 10, marginBottom: 12 },
   sheetHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, marginBottom: space.lg },
@@ -874,16 +962,16 @@ const useStyles = makeStyles((t) => ({
   sheetSub: { ...type.caption, color: t.c.muted, marginTop: 3 },
 
   settingRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.border,
-    borderRadius: radius.md, padding: 14, marginBottom: space.sm,
+    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.divider,
+    borderRadius: radius.lg, padding: 14, marginBottom: space.sm,
   },
-  rowIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  rowIcon: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
   rowTitle: { fontSize: 14, fontWeight: '600', color: t.c.text },
   rowDesc: { fontSize: 12.5, color: t.c.muted, marginTop: 2, lineHeight: 18 },
 
   toast: {
     position: 'absolute', left: space.xl, right: space.xl, bottom: 84, flexDirection: 'row', alignItems: 'center', gap: 10,
-    backgroundColor: t.c.toastBg, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 16, elevation: 8,
+    backgroundColor: t.c.toastBg, borderRadius: radius.lg, paddingVertical: 13, paddingHorizontal: 16, elevation: 8,
     shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: { width: 0, height: 4 },
   },
   toastText: { flex: 1, color: t.c.toastText, fontSize: 13.5, fontWeight: '500' },

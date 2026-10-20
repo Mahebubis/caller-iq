@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { Platform, Switch, Text, TextInput, View } from 'react-native';
-import { makeStyles, radius, space, type, ThemePref, useTheme } from '../theme';
+import { Platform, Pressable, Switch, Text, TextInput, View } from 'react-native';
+import { ACCENTS, AccentKey, FontSize, makeStyles, radius, space, type, ThemePref, useTheme } from '../theme';
+import { Gradient } from '../art';
+import type { Appearance } from '../../App';
 import { ago } from '../format';
 import { Button, Chip, Field, Icon, Segmented, Sheet, SettingRow } from '../ui';
 import { SimDiagnostics, SimNicknameMap, UssdSettings } from '../types';
@@ -21,6 +23,8 @@ interface Props {
   onClose: () => void;
   themePref: ThemePref;
   onThemePref: (p: ThemePref) => void;
+  /** Accent colour and font size, next to the theme. */
+  appearance?: Appearance;
   appVersion: string;
 
   unlocked: boolean;
@@ -84,7 +88,31 @@ export default function SettingsSheet(p: Props) {
   return (
     <Sheet visible={p.visible} onClose={p.onClose} title="Settings" subtitle={`Caller IQ ${p.appVersion ? `v${p.appVersion}` : ''}`}>
       <Text style={s.section}>Appearance</Text>
+      <Text style={s.label}>Theme</Text>
       <Segmented options={THEMES} value={p.themePref} onChange={p.onThemePref} />
+      {!!p.appearance && (
+        <>
+          <Text style={s.label}>Accent colour · {ACCENTS[p.appearance.accent].label}</Text>
+          <View style={s.swatches}>
+            {(Object.keys(ACCENTS) as AccentKey[]).map((k) => {
+              const on = p.appearance!.accent === k;
+              return (
+                <Pressable key={k} onPress={() => p.appearance!.onAccent(k)} accessibilityRole="radio" accessibilityState={{ selected: on }} accessibilityLabel={ACCENTS[k].label} style={[s.swatchRing, on && { borderColor: ACCENTS[k].base }]}>
+                  <Gradient colors={ACCENTS[k].grad} angle={135} corner={20} style={s.swatch}>
+                    {on && <Icon name="check" size={20} color="#FFFFFF" style={{ alignSelf: 'center', marginTop: 10 }} />}
+                  </Gradient>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Text style={s.label}>Text size</Text>
+          <Segmented
+            options={[{ key: 'small', label: 'Small' }, { key: 'medium', label: 'Medium' }, { key: 'large', label: 'Large' }] as const}
+            value={p.appearance.fontSize}
+            onChange={(f: FontSize) => p.appearance!.onFontSize(f)}
+          />
+        </>
+      )}
 
       {!p.unlocked ? (
         <View style={s.lockCard}>
@@ -241,6 +269,9 @@ export default function SettingsSheet(p: Props) {
 
 const useStyles = makeStyles((t) => ({
   section: { ...type.overline, color: t.c.muted, marginTop: space.xl, marginBottom: space.sm + 2 },
+  swatches: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: space.sm },
+  swatchRing: { borderWidth: 3, borderColor: 'transparent', borderRadius: 26, padding: 3 },
+  swatch: { width: 40, height: 40 },
   label: { ...type.label, color: t.c.textSoft, marginTop: space.sm, marginBottom: space.sm },
   desc: { fontSize: 12.5, color: t.c.muted, marginTop: 4, lineHeight: 18 },
   rowTitle: { fontSize: 14, fontWeight: '600', color: t.c.text },

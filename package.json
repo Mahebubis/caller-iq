@@ -4,9 +4,12 @@
   "private": true,
   "scripts": {
     "android": "react-native run-android",
-    "start": "react-native start"
+    "start": "react-native start",
+    "dev": "node scripts/dev.js",
+    "bridge": "npm --prefix whatsapp-bridge start"
   },
   "dependencies": {
+    "papaparse": "^5.4.1",
     "react": "18.2.0",
     "react-native": "0.73.6"
   },
@@ -18,6 +21,7 @@
     "@react-native/babel-preset": "^0.73.21",
     "@react-native/metro-config": "^0.73.5",
     "@react-native/typescript-config": "^0.73.1",
+    "@types/papaparse": "^5.3.14",
     "@types/react": "^18.2.6",
     "typescript": "^5.0.4"
   },

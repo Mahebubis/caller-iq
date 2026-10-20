@@ -28,3 +28,9 @@ app/build/
 # JVM crash dumps
 hs_err_pid*.log
 replay_pid*.log
+
+# WhatsApp bridge login session and browser cache
+whatsapp-bridge/.wwebjs_auth/
+whatsapp-bridge/.wwebjs_cache/
+whatsapp-bridge/data/
+whatsapp-bridge/.env

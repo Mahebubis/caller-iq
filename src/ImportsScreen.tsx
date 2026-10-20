@@ -1,9 +1,18 @@
 import React, { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, FlatList, NativeModules, Pressable, RefreshControl, Text, View } from 'react-native';
-import { makeStyles, radius, space, type, useTheme } from './theme';
-import { errorKind, panelAsk } from './api';
+import { ActivityIndicator, Alert, AppState, FlatList, NativeModules, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
+import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
+import { Avatar } from './art';
+import { LIST_TONES } from './sheets/QuickCallSheet';
+import { errorKind, panelAsk, panelDevice } from './api';
 import { ago, callbackTime, dateOnly, dueIn, num, plural, prettyPhone, serverTime, talk } from './format';
 import { MAX_ATTEMPTS, ScheduleTarget, SmsTarget } from './types';
+import { useWaSend, WaContact } from './whatsapp';
+import { Agent, crm, csvRow, EMPTY_META, hourWindow, Meta, native, Stage, STAGES, waited } from './crm';
+import { DRIP, DRIP_STEPS, fillSales, OFFER, TEMPLATES } from './sales';
+import { loadLinks, saveLinks, SheetLink, SYNC_EVERY_MS, syncLink } from './sheetSync';
+import { usePoints, useUndo } from './engage';
+import ImportSheet from './sheets/ImportSheet';
+import type { FocusTarget } from './sheets/FocusSheet';
 import {
   Appear, AttemptBadge, Banner, Button, Chip, ChipBar, EmptyState, Field, Icon, IconButton, IconName, IndexBadge, MetricTile, Pill,
   ProgressBar, PulseDot, SearchField, SettingRow, Sheet, Skeleton, SkeletonCard, Tactile, useToast,
@@ -79,10 +88,33 @@ export interface ImportRow {
   /** Quick SMS sent to this number from the app. */
   sms_count?: number | null;
   sms_at?: string | null;
+  /** WhatsApp messages sent to this number, from the app or a campaign. */
+  wa_count?: number | null;
+  wa_at?: string | null;
+  /** VIP kept above #1; when the lead first called us (file's time column) and its hour; missed calls merged in. */
+  pinned?: number;
+  lead_at?: string | null;
+  best_hour?: number | null;
+  inbound_missed?: number;
+  /** The phone (device id) this person was shared out to; '' = anyone. */
+  assigned_to?: string;
+  /** Deal fields (crm.php): stage, sentiment, BANT, heat, lost reason, offer hold, DND, WhatsApp reply. */
+  stage?: Stage | '' | null;
+  sentiment?: string | null;
+  bant?: number | null;
+  heat?: number | null;
+  lost_reason?: string | null;
+  offer_until?: string | null;
+  dnd?: number | null;
+  replied_at?: string | null;
+  reply_text?: string | null;
+  reply_ack_at?: string | null;
+  activity_at?: string | null;
 }
 
 export type Show = 'all' | 'called' | 'connected' | 'not_connected' | 'never' | 'purchased'
-  | 'to_call' | 'needs_callback' | 'scheduled' | 'done' | 'maxed';
+  | 'to_call' | 'needs_callback' | 'scheduled' | 'done' | 'maxed' | 'wa_sent'
+  | 'replied' | 'converted' | 'ghosting' | 'review' | 'dnd';
 
 interface Summary {
   rows_total: number;
@@ -97,6 +129,12 @@ interface Summary {
   scheduled?: number;
   done?: number;
   maxed?: number;
+  wa_sent?: number;
+  wa_replied?: number;
+  converted?: number;
+  review?: number;
+  ghosting?: number;
+  dnd?: number;
 }
 
 /** People on a list still to be called — the panel's live count, or "never called" from an older panel. */
@@ -115,11 +153,29 @@ export interface ImportsHandle {
   /** Closes whatever the Lists tab has open; false when there was nothing to close. */
   handleBack: () => boolean;
   /** Opens one list straight away — used by the shortcut on the Calls tab. */
-  openListById: (id: number, startShow?: Show) => void;
+  openListById: (id: number, startShow?: Show, powerDial?: boolean) => void;
   /** Re-reads every list quietly — the Calls tab's pull-to-refresh asks for this. */
   refresh: () => void;
   /** Re-reads what is on screen — after a callback time was set or cleared. */
   refreshOpen: () => void;
+  /** From the Focus workspace: fix a name / number / status, pin, or show new deal fields. */
+  editRow: (t: FocusTarget, patch: { name?: string; phone?: string; status?: string }) => Promise<void>;
+  pinRow: (t: FocusTarget, pinned: boolean) => Promise<void>;
+  patchMeta: (number: string, meta: Meta) => void;
+  /** The people on screen, for the search palette (with their #). */
+  visibleRows: () => { target: FocusTarget; status: string }[];
+  /** Keyboard N: the power dialer skips on; otherwise the next person after `number` opens. */
+  next: (afterNumber?: string) => FocusTarget | null;
+  /** Keyboard Space with nobody in focus: the power dialer's "Call now". */
+  dialerCallNow: () => boolean;
+  /** The power dialer's current or last person, for keyboard W. */
+  dialerPerson: () => FocusTarget | null;
+  /** The call screen's power-dialer controls. */
+  dialerNext: () => void;
+  dialerPause: () => void;
+  dialerResume: () => void;
+  dialerSkip: () => void;
+  dialerStop: () => void;
 }
 
 interface Props {
@@ -133,6 +189,22 @@ interface Props {
   addLog: (msg: string) => void;
   /** Every list as last read, so the Calls tab can show them too. */
   onListsChange?: (lists: ImportList[]) => void;
+  /** Opens the Focus workspace on one person. */
+  onFocus: (t: FocusTarget) => void;
+  /** The power dialer's state, for the in-app call screen (null when it is not running). */
+  onDialerChange?: (d: DialerInfo | null) => void;
+  /** Opens the Reports tab (tapping Talk time). */
+  onOpenReports?: () => void;
+}
+
+export interface DialerInfo {
+  phase: 'countdown' | 'calling' | 'wrapup' | 'paused';
+  pos: number;
+  total: number;
+  /** When the countdown runs out (ms). */
+  at: number;
+  current: { name: string; number: string; segment: string } | null;
+  next: { name: string; number: string } | null;
 }
 
 const PER_PAGE = 100;
@@ -141,13 +213,19 @@ const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
 const CACHE_LISTS = 'imports_lists_v1';
 const cacheDetailKey = (id: number) => `imports_detail_v1_${id}`;
 
-/* The quick-filter tabs above every list; the first five are the working views. */
+/* The quick-filter tabs above every list; the first six are the working views. */
 const SHOW_CHIPS: { key: Show; label: string; icon?: IconName; count: (s: Summary) => number | undefined }[] = [
   { key: 'all', label: 'All', count: (s) => s.rows_total },
   { key: 'needs_callback', label: 'Needs callback', icon: 'phone_callback', count: (s) => s.needs_callback },
   { key: 'never', label: 'Uncalled only', icon: 'call', count: (s) => s.never },
   { key: 'scheduled', label: 'Scheduled', icon: 'alarm', count: (s) => s.scheduled },
+  { key: 'wa_sent', label: 'WhatsApp sent', icon: 'chat', count: (s) => s.wa_sent },
   { key: 'maxed', label: 'Max attempts', icon: 'block', count: (s) => s.maxed },
+  { key: 'replied', label: 'Replied', icon: 'chat_bubble_outline', count: (s) => s.wa_replied },
+  { key: 'ghosting', label: 'Ghosting reviver', icon: 'local_fire_department', count: (s) => s.ghosting },
+  { key: 'converted', label: 'Converted', icon: 'emoji_events', count: (s) => s.converted },
+  { key: 'review', label: 'Needs review', icon: 'warning_amber', count: (s) => s.review },
+  { key: 'dnd', label: 'DND', icon: 'block', count: (s) => s.dnd },
   { key: 'connected', label: 'Connected', count: (s) => s.connected },
   { key: 'not_connected', label: 'Not connected', count: (s) => s.not_connected },
   { key: 'purchased', label: 'Purchased', count: (s) => s.purchased },
@@ -220,17 +298,21 @@ const rowStatus = (r: ImportRow): string => {
   return (r.total || 0) > 0 ? 'Not connected' : 'Not called';
 };
 
-/* The auto-dialer works down people still owed a call, under the attempt limit. */
+/* Still owed a call, or rang with no answer: where a WhatsApp counts as the latest step. */
+const WA_STATUSES = ['needs_callback', 'missed_call', 'not_connected', 'not_called'];
+
+/* The power dialer works down people still owed a call, under the attempt limit. */
 const DIAL_STATUSES = ['not_called', 'missed_call', 'needs_callback'];
 const START_MS = 3000;    // a moment to cancel before the first call goes out
-const WRAP_MS = 6000;     // after a call: time to breathe before the next one
+const WRAP_MS = 4000;     // after the outcome is logged: a breath before the next call
 
 interface AutoDial {
   key: string;            // the list / filter / search it was started on
   picked: boolean;        // people chosen by hand (bulk "Dial"): called whatever their status
   ids: number[];
   pos: number;
-  phase: 'countdown' | 'calling' | 'paused';
+  /** countdown → calling → wrapup (call ended, waiting for its outcome) → countdown … */
+  phase: 'countdown' | 'calling' | 'wrapup' | 'paused';
   at: number;             // when the countdown ends
   called: number;
 }
@@ -240,10 +322,18 @@ const backoff = (n: number) => Math.min(5 * 60 * 1000, 30 * 1000 * 2 ** Math.max
 
 /* ── the screen ─────────────────────────────────────────────────────────── */
 
-const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, onDial, onAutoDial, onSchedule, onSms, addLog, onListsChange }, ref) => {
+const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, onDial, onAutoDial, onSchedule, onSms, addLog, onListsChange, onFocus, onDialerChange, onOpenReports }, ref) => {
   const t = useTheme();
   const s = useStyles();
   const toast = useToast();
+  const wa = useWaSend();
+  const points = usePoints();
+  const undo = useUndo();
+  const [importOpen, setImportOpen] = useState<boolean>(false);
+  const [listMenu, setListMenu] = useState<ImportList | null>(null);
+  const [listMenuMode, setListMenuMode] = useState<'' | 'merge' | 'split'>('');
+  const [view, setView] = useState<'list' | 'board'>('list');
+  const [exporting, setExporting] = useState<boolean>(false);
 
   const [lists, setLists] = useState<ImportList[]>([]);
   const [listsAt, setListsAt] = useState<number>(0);
@@ -269,6 +359,8 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
   const [dialled, setDialled] = useState<{ [rowId: number]: { at: number; calls: number } }>({});
   // Attempts made from this phone, shown before the panel has the calls.
   const [tried, setTried] = useState<{ [rowId: number]: number }>({});
+  const triedRef = useRef(tried);
+  triedRef.current = tried;
   const [auto, setAuto] = useState<AutoDial | null>(null);
   const autoRef = useRef<AutoDial | null>(null);
   autoRef.current = auto;
@@ -276,8 +368,19 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
   // Multi-select for bulk actions; `selecting` stays on until cancelled, even with nothing ticked.
   const [selected, setSelected] = useState<{ [rowId: number]: true }>({});
   const [selecting, setSelecting] = useState<boolean>(false);
-  const [bulkSheet, setBulkSheet] = useState<'' | 'status' | 'move'>('');
+  const [bulkSheet, setBulkSheet] = useState<'' | 'status' | 'move' | 'assign'>('');
+  // Sharing people out: the team, who is picked, and whose people the list shows.
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [assignPick, setAssignPick] = useState<string[]>([]);
+  const [assigned, setAssigned] = useState<string>('');
+  // Lists that pull new rows from a Google Sheet.
+  const [sheetLinks, setSheetLinks] = useState<SheetLink[]>([]);
   const [bulkBusy, setBulkBusy] = useState<boolean>(false);
+  const [selectingAll, setSelectingAll] = useState<boolean>(false);
+  // "First 30": how many to pick from the top of this view, typed in for Custom.
+  const [customN, setCustomN] = useState<string | null>(null);
+  // Everyone "Select all matching" picked, including people not loaded on screen yet.
+  const matching = useRef<Map<number, { name: string; phone: string }>>(new Map());
 
   const [noteRow, setNoteRow] = useState<ImportRow | null>(null);
   const [noteCaller, setNoteCaller] = useState<string>('');
@@ -294,13 +397,14 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
   const dialledAt = useRef<number>(0);
   const moreInFlight = useRef<boolean>(false);
 
-  const keyOf = (id: number | null, sh: Show, query: string) => `${id}|${sh}|${query}`;
+  const keyOf = (id: number | null, sh: Show, query: string) => `${id}|${sh}|${query}|${assigned}`;
   const currentKey = keyOf(openId, show, q);
 
   // Effects and timers call through this, so they always see the latest state.
   const live = useRef<any>({});
-  live.current = { active, openId, show, q, currentKey, detail, lists, listsAt, myName };
+  live.current = { active, openId, show, q, assigned, currentKey, detail, lists, listsAt, myName, tried: {} as { [id: number]: number } };
 
+  live.current.tried = triedRef.current;
   const ask = (body: any, timeoutMs = 25000) => panelAsk('imports.php', body, syncEndpoint, timeoutMs);
 
   /* ── every uploaded list ── */
@@ -365,7 +469,7 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
   /* ── the people on one list ── */
 
   const loadDetail = async (mode: 'open' | 'silent' | 'more' | 'pull') => {
-    const { openId: id, show: sh, q: query, currentKey: key, detail: cur } = live.current;
+    const { openId: id, show: sh, q: query, assigned: who, currentKey: key, detail: cur } = live.current;
     if (id == null) return;
     const have: Detail | null = cur && cur.key === key ? cur : null;
 
@@ -386,7 +490,7 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       const page = mode === 'more' ? shown / PER_PAGE + 1 : 1;
       const data = await ask({
         action: 'detail', id, page, per_page: per, sort: 'row', dir: 'asc', q: query, max: MAX_ATTEMPTS,
-        show: sh === 'purchased' ? 'all' : sh, buy: sh === 'purchased' ? 'yes' : '',
+        show: sh === 'purchased' ? 'all' : sh, buy: sh === 'purchased' ? 'yes' : '', assigned: who,
       });
       const got: ImportRow[] = Array.isArray(data.rows) ? data.rows : [];
 
@@ -528,6 +632,55 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
     return () => clearTimeout(timer);
   }, [listQInput]);
 
+  /* ── the team (for sharing people out), and Google Sheet sync ── */
+  useEffect(() => {
+    if (active && !agents.length) crm.agents().then((a) => { agentNames = Object.fromEntries(a.map((x) => [x.device_id, x.name])); setAgents(a); }).catch(() => {});
+  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const syncing = useRef<boolean>(false);
+  const runSheetSync = useCallback(async (only?: number) => {
+    if (syncing.current) return;
+    syncing.current = true;
+    try {
+      const links = await loadLinks();
+      if (!links.length) { setSheetLinks([]); return; }
+      const out: SheetLink[] = [];
+      let added = 0;
+      for (const l of links) {
+        if (only != null && l.listId !== only) { out.push(l); continue; }
+        const next = await syncLink(l, (body, ms) => panelAsk('imports.php', body, syncEndpoint, ms));
+        added += next.lastAdded;
+        if (next.lastAdded) addLog(`Sheet sync: ${next.lastAdded} new rows into “${l.listName}”.`);
+        out.push(next);
+      }
+      saveLinks(out);
+      setSheetLinks(out);
+      if (added) {
+        toast(`${plural(added, 'new lead')} from Google Sheets`);
+        fn.current.loadLists('silent');
+        if (live.current.openId != null) fn.current.refreshVisible('silent');
+      } else if (only != null) {
+        const l = out.find((x) => x.listId === only);
+        toast(l?.error ? `Sheet sync failed — ${l.error}` : 'Sheet checked — nothing new', l?.error ? 'error' : 'default');
+      }
+    } finally {
+      syncing.current = false;
+    }
+  }, [syncEndpoint, addLog, toast]);
+  useEffect(() => {
+    loadLinks().then(setSheetLinks);
+    const tick = () => { if (AppState.currentState === 'active') runSheetSync(); };
+    const first = setTimeout(tick, 15000);
+    const timer = setInterval(tick, SYNC_EVERY_MS);
+    return () => { clearTimeout(first); clearInterval(timer); };
+  }, [runSheetSync]);
+  const unlinkSheet = async (listId: number) => {
+    const next = (await loadLinks()).filter((l) => l.listId !== listId);
+    saveLinks(next);
+    setSheetLinks(next);
+    toast('No longer syncing from the sheet');
+  };
+
   /* ── navigation ── */
 
   const openList = useCallback((l: ImportList, startShow: Show = 'all') => {
@@ -536,6 +689,13 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
     setQ('');
     setOpenId(l.id);
   }, []);
+
+  /** A list's "Start dialer": open it on the people still to call, and start the power dialer. */
+  const powerDial = useCallback((l: ImportList) => {
+    const sh: Show = l.to_call == null ? 'never' : 'to_call';
+    pendingDial.current = keyOf(l.id, sh, '');
+    openList(l, sh);
+  }, [openList]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const closeList = () => {
     if (autoRef.current) stopAuto();
@@ -554,9 +714,76 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
     },
     refresh: () => fn.current.loadLists('silent'),
     refreshOpen: () => fn.current.refreshVisible('silent'),
-    openListById: (id: number, startShow: Show = 'all') => {
+    openListById: (id: number, startShow: Show = 'all', powerDial = false) => {
       const l = live.current.lists.find((x: ImportList) => x.id === id);
-      if (l) openList(l, startShow);
+      if (!l) return;
+      if (powerDial) pendingDial.current = keyOf(id, startShow, '');
+      openList(l, startShow);
+    },
+    editRow: async (tg, patch) => {
+      if (tg.importId == null || tg.rowId == null) return;
+      try {
+        const before = (live.current.detail?.rows || []).find((r: ImportRow) => r.id === tg.rowId);
+        const d = await panelAsk('imports.php', { action: 'edit_row', id: tg.importId, row_id: tg.rowId, ...patch }, syncEndpoint);
+        const row = d.row || {};
+        patchRows((r) => r.id === tg.rowId, (r) => ({ ...r, name: row.name ?? r.name, phone_raw: row.phone_raw ?? r.phone_raw, phone_norm: row.phone_norm ?? r.phone_norm, import_status: row.import_status ?? r.import_status }));
+        toast('Saved');
+        if (patch.status && before) {
+          undo.push(`Status changed for ${before.name || 'this person'}`, () => panelAsk('imports.php', { action: 'edit_row', id: tg.importId, row_id: tg.rowId, status: before.import_status || 'not_called' }, syncEndpoint).then(() => fn.current.refreshVisible('silent')));
+        }
+        fn.current.refreshVisible('silent');
+      } catch (e: any) {
+        toast(`Not saved — ${e?.message || e}`, 'error');
+        throw e;
+      }
+    },
+    pinRow: async (tg, pinned) => {
+      if (tg.importId == null || tg.rowId == null) return;
+      try {
+        await panelAsk('imports.php', { action: 'pin', id: tg.importId, row_id: tg.rowId, pinned }, syncEndpoint);
+        patchRows((r) => r.id === tg.rowId, (r) => ({ ...r, pinned: pinned ? 1 : 0 }));
+        dropDetail(tg.importId, live.current.currentKey);
+        fn.current.refreshVisible('silent');
+        undo.push(pinned ? 'Pinned to the top' : 'Unpinned', () => panelAsk('imports.php', { action: 'pin', id: tg.importId, row_id: tg.rowId, pinned: !pinned }, syncEndpoint).then(() => fn.current.refreshVisible('silent')));
+      } catch (e: any) {
+        toast(`Not saved — ${e?.message || e}`, 'error');
+        throw e;
+      }
+    },
+    patchMeta: (number, m) => patchRows(sameNumber(number), (r) => ({ ...r, ...m, stage: m.stage })),
+    visibleRows: () => {
+      const rs: ImportRow[] = live.current.detail?.key === live.current.currentKey ? live.current.detail.rows : [];
+      const pins = rs.filter((r) => r.pinned).length;
+      return rs.map((r, i) => ({ target: targetOf(r, r.pinned ? 0 : i - pins + 1), status: rowStatus(r) }));
+    },
+    next: (afterNumber) => {
+      if (autoRef.current) { const a = autoRef.current; setAuto({ ...a, pos: a.pos + 1, phase: 'countdown', at: Date.now() + START_MS }); return null; }
+      const rs: ImportRow[] = live.current.detail?.key === live.current.currentKey ? live.current.detail.rows : [];
+      if (!rs.length) return null;
+      const k = (afterNumber || '').replace(/\D/g, '').slice(-10);
+      const at = k ? rs.findIndex((r) => (r.phone_norm || '').slice(-10) === k) : -1;
+      const pins = rs.filter((r) => r.pinned).length;
+      const i = Math.min(rs.length - 1, at + 1);
+      return targetOf(rs[i], rs[i].pinned ? 0 : i - pins + 1);
+    },
+    dialerCallNow: () => {
+      const a = autoRef.current;
+      if (!a || a.phase !== 'countdown') return false;
+      setAuto({ ...a, at: Date.now() });
+      return true;
+    },
+    dialerNext: () => fnAuto.current.next(),
+    dialerPause: () => { const a = autoRef.current; if (a) setAuto({ ...a, phase: 'paused' }); },
+    dialerResume: () => { const a = autoRef.current; if (a) setAuto({ ...a, phase: 'countdown', at: Date.now() + START_MS }); },
+    dialerSkip: () => { const a = autoRef.current; if (a) setAuto({ ...a, pos: a.pos + 1, phase: 'countdown', at: Date.now() + START_MS }); },
+    dialerStop: () => fnAuto.current.stopAuto(),
+    dialerPerson: () => {
+      const a = autoRef.current;
+      if (!a) return null;
+      const rs: ImportRow[] = live.current.detail?.rows || [];
+      const id = a.phase === 'countdown' && a.called > 0 ? a.ids[a.pos - 1] : a.ids[a.pos];
+      const r = rs.find((x) => x.id === id);
+      return r ? targetOf(r, rs.indexOf(r) + 1) : null;
     },
   }));
 
@@ -609,11 +836,18 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
     while (pos < a.ids.length && !ok(byId.get(a.ids[pos]))) pos++;
     if (pos >= a.ids.length) { stopAuto(`Auto-dial finished · ${plural(a.called, 'call')} made`); return; }
     awayRef.current = false;
+    wentLive.current = false;
     setAuto({ ...a, pos, phase: 'calling', at: Date.now() });
     call(byId.get(a.ids[pos])!, true);
   };
+  /** After the call: the outcome is logged (or skipped) — a short breath, then the next one. */
+  const next = () => {
+    const a = autoRef.current;
+    if (!a || (a.phase !== 'wrapup' && a.phase !== 'calling')) return;
+    setAuto({ ...a, pos: a.pos + 1, called: a.called + 1, phase: 'countdown', at: Date.now() + WRAP_MS });
+  };
   const fnAuto = useRef<any>({});
-  fnAuto.current = { dialCurrent, stopAuto };
+  fnAuto.current = { dialCurrent, stopAuto, next };
 
   // The countdown: dial when it runs out.
   useEffect(() => {
@@ -622,16 +856,52 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
     return () => clearTimeout(timer);
   }, [auto]);
 
-  // Leaving for the call, then coming back to the app, is the call wrapping up.
+  /* The call ending. The phone reports it (CallIQCallState: OFFHOOK, then IDLE): the dialer then
+     waits for the outcome before the next call. On a phone that does not report it, coming back to
+     the app stands in for the hang-up, as before. */
+  const callStateSeen = useRef<boolean>(false);
+  const wentLive = useRef<boolean>(false);
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (st) => {
+    const sub = native.events?.addListener('CallIQCallState', (ev: { state: string }) => {
+      callStateSeen.current = true;
       const a = autoRef.current;
       if (!a || a.phase !== 'calling') return;
-      if (st !== 'active') { awayRef.current = true; return; }
-      if (awayRef.current) setAuto({ ...a, pos: a.pos + 1, called: a.called + 1, phase: 'countdown', at: Date.now() + WRAP_MS });
+      if (ev.state === 'OFFHOOK') wentLive.current = true;
+      else if (ev.state === 'IDLE' && wentLive.current) {
+        wentLive.current = false;
+        setAuto({ ...a, phase: 'wrapup', at: Date.now() });
+      }
     });
-    return () => sub.remove();
+    const app = AppState.addEventListener('change', (st) => {
+      const a = autoRef.current;
+      if (!a || a.phase !== 'calling' || callStateSeen.current) return;
+      if (st !== 'active') { awayRef.current = true; return; }
+      if (awayRef.current) setAuto({ ...a, phase: 'wrapup', at: Date.now() });
+    });
+    return () => { sub?.remove(); app.remove(); };
   }, []);
+
+  useEffect(() => {
+    if (!onDialerChange) return;
+    if (!auto) { onDialerChange(null); return; }
+    const byId = new Map<number, ImportRow>((detail?.rows || []).map((r) => [r.id, r]));
+    const cur = byId.get(auto.ids[auto.pos]);
+    const nx = byId.get(auto.ids[auto.pos + 1]);
+    const seg = lists.find((l) => l.id === openId)?.name || '';
+    onDialerChange({
+      phase: auto.phase, pos: auto.pos, total: auto.ids.length, at: auto.at,
+      current: cur ? { name: cur.name, number: dialNumber(cur) || cur.phone_norm, segment: seg } : null,
+      next: nx ? { name: nx.name, number: dialNumber(nx) || nx.phone_norm } : null,
+    });
+  }, [auto, detail?.rows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // "Start calling" from Home / the call button: the power dialer starts once the people are in.
+  const pendingDial = useRef<string>('');
+  useEffect(() => {
+    if (!pendingDial.current || !detail || detail.key !== pendingDial.current || autoRef.current) return;
+    pendingDial.current = '';
+    startAuto();
+  }, [detail]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Another list, filter or search ends the run; newly loaded people who qualify join the queue,
   // and the next page is fetched before the queue runs dry.
@@ -728,6 +998,7 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
             {listsAt ? `Updated ${ago(listsAt)} · pull down to refresh` : 'Uploaded by the admin in Caller IQ → Imports'}
           </Text>
         </View>
+        <IconButton icon="upload_file" label="Import a list from a CSV" tone="soft" onPress={() => setImportOpen(true)} />
         {listsLoading && !pulling ? (
           <View style={{ width: 40, alignItems: 'center' }}><ActivityIndicator size="small" color={t.c.primary} /></View>
         ) : (
@@ -805,8 +1076,8 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
   );
 
   const renderList = useCallback(({ item, index }: { item: ImportList; index: number }) => (
-    <ListCard l={item} index={index} onOpen={openList} />
-  ), [openList]);
+    <ListCard l={item} index={index} onOpen={openList} onPowerDial={powerDial} onMenu={setListMenu} sheet={sheetLinks.find((x) => x.listId === item.id)} />
+  ), [openList, powerDial, sheetLinks]);
 
   /* ── one list's people ── */
 
@@ -828,7 +1099,14 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
           </Text>
         </View>
         {detailLoading && rows.length > 0 && <ActivityIndicator size="small" color={t.c.primary} />}
-        {rows.length > 0 && !auto && (
+        {!selecting && !auto && (
+          <IconButton icon={view === 'list' ? 'view_kanban' : 'view_list'} label={view === 'list' ? 'Board view' : 'List view'} tone="outlined" onPress={() => setView(view === 'list' ? 'board' : 'list')} />
+        )}
+        {rows.length > 0 && !auto && !selecting && (
+          exporting ? <ActivityIndicator size="small" color={t.c.primary} />
+            : <IconButton icon="download" label="Export this view as CSV" tone="outlined" onPress={exportCsv} />
+        )}
+        {rows.length > 0 && !auto && view === 'list' && (
           <IconButton
             icon={selecting ? 'close' : 'checklist'}
             label={selecting ? 'Stop selecting' : 'Select people'}
@@ -840,11 +1118,13 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
 
       {sum && (
         /* Segment summary — live counts; each pill shows just those people. */
-        <View style={s.summary}>
-          <SummaryPill label="Total" value={sum.rows_total} color={t.c.textSoft} on={show === 'all'} onPress={() => setShow('all')} />
-          <SummaryPill label="To call" value={sum.to_call ?? sum.never} color={t.c.danger} on={show === 'to_call'} onPress={() => setShow(sum.to_call == null ? 'never' : 'to_call')} />
+        <View style={s.summaryGrid}>
+          <SummaryPill label="Total (#)" value={sum.rows_total} color={t.c.textSoft} on={show === 'all'} onPress={() => setShow('all')} />
+          <SummaryPill label="Callback / missed" value={sum.needs_callback ?? sum.to_call ?? sum.never} color={t.c.danger} on={show === 'needs_callback'} onPress={() => setShow('needs_callback')} />
           <SummaryPill label="Scheduled" value={sum.scheduled ?? 0} color={t.c.blue} on={show === 'scheduled'} onPress={() => setShow('scheduled')} />
-          <SummaryPill label="Called" value={sum.done ?? sum.called} color={t.c.success} on={show === 'done'} onPress={() => setShow(sum.done == null ? 'called' : 'done')} />
+          <SummaryPill label="WhatsApp / replied" value={sum.wa_sent ?? 0} extra={sum.wa_replied ? `${num(sum.wa_replied)} replied` : undefined} color={t.c.violet} on={show === 'wa_sent'} onPress={() => setShow('wa_sent')} />
+          <SummaryPill label="Converted" value={sum.converted ?? sum.purchased} color={t.c.success} on={show === 'converted' || show === 'purchased'} onPress={() => setShow(sum.converted == null ? 'purchased' : 'converted')} />
+          <SummaryPill label="Talk time" text={hm(shownDetail?.calls?.talk_sec || 0)} extra={onOpenReports ? 'Full report ›' : undefined} color={t.c.link} onPress={onOpenReports} />
         </View>
       )}
 
@@ -860,26 +1140,70 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
           </Pressable>
         </View>
       )}
+      {selecting && (shownDetail?.total ?? rows.length) > 1 && (
+        <View>
+          <Text style={s.firstLabel}>Pick from the top of this view</Text>
+          <ChipBar>
+            {[10, 30, 50, 100].filter((n) => n < (shownDetail?.total ?? rows.length)).map((n) => (
+              <Chip key={n} label={`First ${n}`} selected={selectedIds.length === n} onPress={() => selectFirst(n)} />
+            ))}
+            <Chip label="Custom…" icon="edit_note" selected={customN != null} onPress={() => setCustomN(customN == null ? '' : null)} />
+          </ChipBar>
+          {customN != null && (
+            <View style={s.customRow}>
+              <View style={{ flex: 1 }}>
+                <Field label={`How many (of ${num(shownDetail?.total ?? rows.length)})`} value={customN} onChangeText={(v) => setCustomN(v.replace(/\D/g, '').slice(0, 5))} keyboardType="number-pad" placeholder="e.g. 30" autoFocus />
+              </View>
+              <Button label="Select" icon="check" size="sm" disabled={!Number(customN)} onPress={() => { selectFirst(Number(customN)); setCustomN(null); }} style={{ marginTop: 26 }} />
+            </View>
+          )}
+        </View>
+      )}
+      {selecting && shownDetail && shownDetail.total > rows.length && selectedIds.length < shownDetail.total && (
+        <Pressable onPress={selectAllMatching} hitSlop={10} accessibilityRole="button" style={s.selectAll}>
+          {selectingAll ? <ActivityIndicator size="small" color={t.c.primary} /> : <Icon name="select_all" size={16} color={t.c.link} />}
+          <Text style={s.selectLink}>Select all {num(shownDetail.total)} matching this filter</Text>
+        </Pressable>
+      )}
 
       {!auto && !selecting && queueCount > 0 && (
         <Button
-          label={`Start auto-dialing · ${num(queueCount)}${shownDetail && rows.length < shownDetail.total ? '+' : ''}`}
+          label={`Start power dialer · ${num(queueCount)}${shownDetail && rows.length < shownDetail.total ? '+' : ''}`}
           icon="play_arrow"
           variant="success"
           size="lg"
           pill
           onPress={() => startAuto()}
-          accessibilityLabel={`Start auto-dialing ${queueCount} people in this view`}
+          accessibilityLabel={`Start the power dialer on ${queueCount} people in this view`}
           style={{ marginBottom: space.md }}
         />
       )}
 
+      {show === 'ghosting' && rows.length > 0 && !selecting && (
+        <Button
+          label={`Revive all ${num(shownDetail?.total ?? rows.length)} on WhatsApp`}
+          icon="local_fire_department"
+          variant="secondary"
+          onPress={reviveAll}
+          style={{ marginBottom: space.md }}
+        />
+      )}
       <SearchField value={qInput} onChangeText={setQInput} placeholder="Search name, email or phone" />
       <ChipBar>
-        {SHOW_CHIPS.map((c) => (
+        {SHOW_CHIPS.filter((c) => !sum || c.count(sum) !== undefined || show === c.key).map((c) => (
           <Chip key={c.key} label={c.label} icon={c.icon} count={sum ? c.count(sum) ?? null : null} selected={show === c.key} onPress={() => setShow(c.key)} />
         ))}
       </ChipBar>
+      {agents.length > 1 && (
+        <ChipBar>
+          <Chip label="Everyone’s" icon="groups" selected={!assigned} onPress={() => setAssigned('')} />
+          <Chip label="Mine" icon="person_outline" selected={assigned === panelDevice()} onPress={() => setAssigned(panelDevice())} />
+          <Chip label="Unassigned" selected={assigned === '__none__'} onPress={() => setAssigned('__none__')} />
+          {agents.filter((a) => a.device_id !== panelDevice()).map((a) => (
+            <Chip key={a.device_id} label={a.name} selected={assigned === a.device_id} onPress={() => setAssigned(a.device_id)} />
+          ))}
+        </ChipBar>
+      )}
 
       {!!detailError && (
         <Banner
@@ -928,6 +1252,43 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
     segment: live.current.lists.find((l: ImportList) => l.id === live.current.openId)?.name,
   }), [onSms]);
 
+  const segmentName = (): string => live.current.lists.find((l: ImportList) => l.id === live.current.openId)?.name || '';
+  const whatsapp = useCallback((r: ImportRow) => {
+    addLog(`WhatsApp to row ${r.row_no} of list #${live.current.openId}.`);
+    wa.openSend({ id: r.id, name: r.name, phone: dialNumber(r) || r.phone_norm, segment: segmentName() });
+  }, [wa.openSend, addLog]); // eslint-disable-line react-hooks/exhaustive-deps
+  const waAtOf = useCallback((r: ImportRow) => Math.max(serverTime(r.wa_at), wa.sentAt(r.phone_norm || r.phone_raw)), [wa]);
+
+  /** What the Focus workspace needs about one person on this list. */
+  const targetOf = (r: ImportRow, index: number): FocusTarget => {
+    const list = live.current.lists.find((l: ImportList) => l.id === live.current.openId);
+    return {
+      number: dialNumber(r) || r.phone_norm || r.phone_raw,
+      name: r.name,
+      email: r.email,
+      segment: list?.name,
+      index: r.pinned ? 0 : index,
+      pinned: !!r.pinned,
+      importId: live.current.openId ?? undefined,
+      rowId: r.id,
+      attempts: Math.max(r.attempts || 0, live.current.tried?.[r.id] || 0),
+      importStatus: r.import_status,
+      statusLabel: rowStatus(r),
+      bestHour: r.best_hour,
+      waitingSince: waitingSince(r, list?.created_at),
+      dueAt: serverTime(r.callback_at) || undefined,
+      meta: rowMeta(r),
+    };
+  };
+  const focus = useCallback((r: ImportRow, index: number) => onFocus(targetOf(r, index)), [onFocus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** One person's row changed (deal fields, pin, name…): every cached view of the list follows. */
+  const patchRows = (match: (r: ImportRow) => boolean, patch: (r: ImportRow) => ImportRow) => {
+    detailCache.current.forEach((d, k) => detailCache.current.set(k, { ...d, rows: d.rows.map((r) => (match(r) ? patch(r) : r)) }));
+    setDetail((d) => (d ? { ...d, rows: d.rows.map((r) => (match(r) ? patch(r) : r)) } : d));
+  };
+  const sameNumber = (n: string) => { const k = n.replace(/\D/g, '').slice(-10); return (r: ImportRow) => (r.phone_norm || '').slice(-10) === k; };
+
   /* ── Multi-select and bulk actions ── */
   const toggle = useCallback((r: ImportRow) => {
     setSelecting(true);
@@ -937,7 +1298,65 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       return next;
     });
   }, []);
-  function clearSelection() { setSelected({}); setSelecting(false); setBulkSheet(''); }
+  function clearSelection() { setSelected({}); setSelecting(false); setBulkSheet(''); matching.current = new Map(); }
+
+  /** Everyone this filter and search match, not just the people loaded so far (the panel's own count). */
+  async function selectAllMatching() {
+    if (openId == null || selectingAll) return;
+    setSelectingAll(true);
+    try {
+      const data = await ask({ action: 'contacts', id: openId, q, max: MAX_ATTEMPTS, show: show === 'purchased' ? 'all' : show, buy: show === 'purchased' ? 'yes' : '', assigned });
+      const list: { id: number; name: string; phone: string; phone_raw: string }[] = Array.isArray(data.contacts) ? data.contacts : [];
+      matching.current = new Map(list.filter((c: any) => !c.dnd).map((c) => [c.id, { name: c.name, phone: (c.phone_raw || '').replace(/\D/g, '').length >= 10 ? c.phone_raw : c.phone }]));
+      // People with no phone number are not in the answer; the ones on screen still count.
+      setSelected(Object.fromEntries([...list.map((c) => c.id), ...rows.map((r) => r.id)].map((id) => [id, true])));
+      if (data.truncated) toast('Selected the first 5,000 — the most one action can take');
+    } catch (e: any) {
+      toast(`Couldn’t select everyone — ${e?.message || e}`, 'error');
+    } finally {
+      setSelectingAll(false);
+    }
+  }
+
+  /**
+   * The first `n` people of this view, in list order (VIPs first) — e.g. 30 of 200 for a WhatsApp
+   * campaign. People not loaded on screen yet are fetched from the panel.
+   */
+  async function selectFirst(n: number) {
+    if (openId == null || n <= 0) return;
+    if (rows.length >= n || (shownDetail && rows.length >= shownDetail.total)) {
+      setSelected(Object.fromEntries(rows.slice(0, n).map((r) => [r.id, true])));
+      toast(`First ${num(Math.min(n, rows.length))} selected`);
+      return;
+    }
+    setSelectingAll(true);
+    try {
+      const data = await ask({ action: 'contacts', id: openId, q, max: MAX_ATTEMPTS, show: show === 'purchased' ? 'all' : show, buy: show === 'purchased' ? 'yes' : '', assigned });
+      const list: { id: number; name: string; phone: string; phone_raw: string; dnd?: number }[] = (Array.isArray(data.contacts) ? data.contacts : []).slice(0, n);
+      matching.current = new Map(list.filter((c) => !c.dnd).map((c) => [c.id, { name: c.name, phone: (c.phone_raw || '').replace(/\D/g, '').length >= 10 ? c.phone_raw : c.phone }]));
+      setSelected(Object.fromEntries(list.map((c) => [c.id, true])));
+      toast(`First ${num(list.length)} selected`);
+    } catch (e: any) {
+      toast(`Couldn’t select them — ${e?.message || e}`, 'error');
+    } finally {
+      setSelectingAll(false);
+    }
+  }
+
+  /** The selected people as WhatsApp contacts, for a campaign. */
+  const selectedContacts = (): WaContact[] => {
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const seg = segmentName();
+    const out: WaContact[] = [];
+    selectedIds.forEach((id) => {
+      const r = byId.get(id);
+      const m = matching.current.get(id);
+      const c: WaContact | null = r ? { id, name: r.name, phone: dialNumber(r) || r.phone_norm, segment: seg }
+        : m ? { id, name: m.name, phone: m.phone, segment: seg } : null;
+      if (c && c.phone && !(r && r.dnd)) out.push(c);
+    });
+    return out;
+  };
   // Selections belong to one view: another list, filter or search starts afresh.
   useEffect(() => { clearSelection(); }, [currentKey]);
 
@@ -958,17 +1377,137 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       setBulkBusy(false);
     }
   };
+  /* The 3-step follow-up drip for everyone picked (DND numbers are left out by the bridge). */
+  async function startBulkDrip() {
+    const list = selectedContacts();
+    if (!list.length) { toast('Nobody picked has a number (or all are DND)'); return; }
+    Alert.alert(
+      `Start the drip for ${plural(list.length, 'person', 'people')}?`,
+      'Each gets a WhatsApp now, another in 24 hours and a last one in 48 hours — stopped for anyone who replies or answers a call.',
+      [{ text: 'Cancel', style: 'cancel' }, {
+        text: 'Start', onPress: async () => {
+          try {
+            const seg = segmentName();
+            const steps = DRIP.en.map((m, i) => ({ afterMin: DRIP_STEPS[i].afterMin, message: m.replace(/\{segment\}/g, OFFER).replace(/\{me\}/g, live.current.myName || 'our team') }));   // {name} is filled per person by the bridge
+            const r = await wa.startDrip(list, steps);
+            if (!r) { toast('Set up the WhatsApp bridge to run drips', 'error'); return; }
+            toast(`Drip started for ${plural(r.enrolled, 'person', 'people')}${r.blocked ? ` · ${r.blocked} DND left out` : ''}`);
+            clearSelection();
+          } catch (e: any) {
+            toast(e?.message || String(e), 'error');
+          }
+        },
+      }],
+    );
+  }
+
+  async function runAssign(clear: boolean) {
+    if (openId == null || !selectedIds.length) return;
+    setBulkBusy(true);
+    try {
+      const r = await crm.assign(openId, clear ? [] : assignPick, { row_ids: selectedIds }, clear);
+      const names = Object.entries(r.per_agent || {}).map(([d, n]) => `${agents.find((a) => a.device_id === d)?.name || d} ${n}`).join(' · ');
+      toast(clear ? `Unassigned ${plural(r.assigned, 'person', 'people')}` : `Shared out: ${names}`);
+      dropDetail(openId);
+      clearSelection();
+      refreshVisible('pull');
+    } catch (e: any) {
+      toast(`Not done — ${e?.message || e}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   const confirmDelete = () => Alert.alert(
     `Delete ${plural(selectedIds.length, 'person', 'people')}?`,
     'They are removed from this list for everyone. Their calls stay in the call log.',
     [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => runBulk('delete', {}, 'Deleted') }],
   );
 
+  /* Ghosting reviver: warm leads gone quiet for 3 days, one reactivation message each. */
+  async function reviveAll() {
+    if (openId == null) return;
+    try {
+      const data = await ask({ action: 'contacts', id: openId, show: 'ghosting', max: MAX_ATTEMPTS, assigned });
+      const seg = segmentName();
+      const list: WaContact[] = (data.contacts || []).filter((c: any) => !c.dnd).map((c: any) => ({ id: c.id, name: c.name, phone: c.phone, segment: seg }));
+      if (!list.length) { toast('Nobody to revive here'); return; }
+      wa.openCampaign(list);
+      toast(`Write or keep the message — it goes to ${plural(list.length, 'lead')}`);
+    } catch (e: any) {
+      toast(e?.message || String(e), 'error');
+    }
+  }
+
+  /* CSV of everything this filter and search show (up to 10,000 people), to the Downloads folder. */
+  async function exportCsv() {
+    if (openId == null || exporting) return;
+    setExporting(true);
+    try {
+      const all: ImportRow[] = [];
+      for (let page = 1; page <= 20; page++) {
+        const data = await ask({ action: 'detail', id: openId, page, per_page: 500, sort: 'row', dir: 'asc', q, max: MAX_ATTEMPTS, show: show === 'purchased' ? 'all' : show, buy: show === 'purchased' ? 'yes' : '', assigned }, 60000);
+        const got: ImportRow[] = data.rows || [];
+        all.push(...got);
+        if (got.length < 500) break;
+      }
+      const pins = all.filter((r) => r.pinned).length;
+      const lines = [csvRow(['#', 'Name', 'Phone', 'Email', 'Status', 'Attempts', 'Stage', 'Heat', 'Sentiment', 'Lost reason', 'Best time', 'Callback at', 'WhatsApp at', 'Replied', 'Calls', 'Last call', 'Comment', 'Tags'])]
+        .concat(all.map((r, i) => csvRow([
+          r.pinned ? '★' : i - pins + 1, r.name, r.phone_raw || r.phone_norm, r.email, rowStatus(r), r.attempts || 0, r.stage || '', r.heat || 0,
+          r.sentiment || '', r.lost_reason || '', hourWindow(r.best_hour), r.callback_at || '', r.wa_at || '', r.replied_at ? 'yes' : '', r.total || 0,
+          r.last_at || '', r.comment || '', (r.tags || []).join(' '),
+        ])));
+      const name = `${(openListInfo?.name || 'list').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 40)}_${show}_${new Date().toISOString().slice(0, 10)}.csv`;
+      const where = await native.saveDownload(name, 'text/csv', lines.join('\n'));
+      toast(`${plural(all.length, 'row')} saved to ${where}`);
+    } catch (e: any) {
+      toast(`Export failed — ${e?.message || e}`, 'error');
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  /* Board: a person moved to another stage. */
+  const moveStage = useCallback(async (r: ImportRow, stage: Stage) => {
+    const number = dialNumber(r) || r.phone_norm;
+    const prev = (r.stage || 'new') as Stage;
+    try {
+      const res = await crm.metaSet(number, { stage });
+      patchRows(sameNumber(number), (x) => ({ ...x, ...res.meta }));
+      points.celebrate(res.awarded);
+      undo.push(`${r.name || 'Lead'} → ${STAGES.find((x) => x.key === stage)?.label}`, () => crm.metaSet(number, { stage: prev }).then((b) => patchRows(sameNumber(number), (x) => ({ ...x, ...b.meta }))));
+    } catch (e: any) {
+      toast(`Not moved — ${e?.message || e}`, 'error');
+    }
+  }, [points, undo, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function listAction(op: 'merge_lists' | 'split_list', body: any, done: string) {
+    const l = listMenu;
+    if (!l) return;
+    setListMenu(null);
+    setListMenuMode('');
+    try {
+      const d = await ask({ action: op, id: l.id, ...body }, 120000);
+      toast(op === 'split_list' ? `${done} · ${d.lists?.length || 0} new lists` : `${done} · ${plural(d.moved || 0, 'person', 'people')} moved`);
+      dropDetail(l.id);
+      if (body.into_id) dropDetail(body.into_id);
+      if (live.current.openId === l.id && op === 'merge_lists') closeList();
+      loadLists('pull');
+    } catch (e: any) {
+      toast(`Not done — ${e?.message || e}`, 'error');
+    }
+  }
+
+  const pinCount = useMemo(() => rows.filter((r) => r.pinned).length, [rows]);
   const renderPerson = useCallback(({ item, index }: { item: ImportRow; index: number }) => (
     <PersonCard
       r={item}
-      index={index}
+      index={item.pinned ? 0 : index - pinCount}
+      listAt={serverTime(openListInfo?.created_at)}
+      onFocus={focus}
       attempts={attemptsOf(item)}
+      waAt={waAtOf(item)}
       dialledAt={dialled[item.id]?.at}
       selecting={selecting}
       selected={!!selected[item.id]}
@@ -977,10 +1516,12 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       onNote={openNote}
       onSchedule={schedule}
       onSms={sms}
+      onWhatsApp={whatsapp}
     />
-  ), [dialled, attemptsOf, selecting, selected, toggle, call, openNote, schedule, sms]);
+  ), [dialled, attemptsOf, waAtOf, selecting, selected, toggle, call, openNote, schedule, sms, whatsapp, pinCount, focus, openListInfo?.created_at]);
 
   const autoRow = auto ? rows.find((r) => r.id === auto.ids[auto.pos]) || null : null;
+  const prevRow = auto && auto.called > 0 && auto.phase === 'countdown' ? rows.find((r) => r.id === auto.ids[auto.pos - 1]) || null : null;
 
   return (
     <View style={{ flex: 1 }}>
@@ -1000,7 +1541,14 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
         />
       </View>
 
-      {openId != null && (
+      {openId != null && view === 'board' && (
+        <View style={{ flex: 1 }}>
+          <View style={[s.body, { paddingBottom: 0 }]}>{detailHeader}</View>
+          <Board listId={openId} ask={ask} onOpen={(r, i) => focus(r, i)} onMove={moveStage} attemptsOf={attemptsOf} />
+        </View>
+      )}
+
+      {openId != null && view === 'list' && (
         <FlatList
           key={`list-${openId}`}
           data={rows}
@@ -1031,9 +1579,14 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
             <IconButton icon="close" label="Stop selecting" size={34} tone="outlined" onPress={clearSelection} />
           </View>
           <View style={s.bulkBtns}>
+            <BulkButton icon="play_arrow" label="Dial" color={t.c.success} disabled={!selectedIds.length || bulkBusy} onPress={() => { const ids = selectedIds; clearSelection(); startAuto(ids); }} />
+            <BulkButton icon="chat" label="WhatsApp" color={t.c.success} disabled={!selectedIds.length || bulkBusy} onPress={() => wa.openCampaign(selectedContacts())} />
+            <BulkButton icon="schedule" label="Drip" color={t.c.blue} disabled={!selectedIds.length || bulkBusy} onPress={startBulkDrip} />
+            <BulkButton icon="groups" label="Assign" disabled={!selectedIds.length || bulkBusy || agents.length < 1} onPress={() => { setAssignPick([]); setBulkSheet('assign'); }} />
+          </View>
+          <View style={s.bulkBtns}>
             <BulkButton icon="sell" label="Status" disabled={!selectedIds.length || bulkBusy} onPress={() => setBulkSheet('status')} />
             <BulkButton icon="drive_file_move" label="Move" disabled={!selectedIds.length || bulkBusy} onPress={() => setBulkSheet('move')} />
-            <BulkButton icon="play_arrow" label="Dial" color={t.c.success} disabled={!selectedIds.length || bulkBusy} onPress={() => { const ids = selectedIds; clearSelection(); startAuto(ids); }} />
             <BulkButton icon="delete_outline" label="Delete" color={t.c.danger} disabled={!selectedIds.length || bulkBusy} onPress={confirmDelete} />
           </View>
         </Appear>
@@ -1042,11 +1595,29 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       <Sheet
         visible={!!bulkSheet}
         onClose={() => setBulkSheet('')}
-        title={bulkSheet === 'move' ? `Move ${plural(selectedIds.length, 'person', 'people')} to…` : `Set status for ${plural(selectedIds.length, 'person', 'people')}`}
+        title={bulkSheet === 'move' ? `Move ${plural(selectedIds.length, 'person', 'people')} to…`
+          : bulkSheet === 'assign' ? `Share out ${plural(selectedIds.length, 'person', 'people')}`
+          : `Set status for ${plural(selectedIds.length, 'person', 'people')}`}
         subtitle={bulkSheet === 'move'
           ? 'They leave this list and join the one you pick, with their notes and call history.'
+          : bulkSheet === 'assign' ? 'Round robin: the 1st goes to the first person picked, the 2nd to the next… so everyone gets an equal share.'
           : 'The status they count as imported with. A call where someone gets through still moves them on.'}
       >
+        {bulkSheet === 'assign' && (
+          <View>
+            <ChipBar>
+              {agents.map((a) => (
+                <Chip key={a.device_id} label={`${a.name}${a.device_id === panelDevice() ? ' (me)' : ''}`} selected={assignPick.includes(a.device_id)}
+                  onPress={() => setAssignPick(assignPick.includes(a.device_id) ? assignPick.filter((x) => x !== a.device_id) : [...assignPick, a.device_id])} />
+              ))}
+            </ChipBar>
+            <Text style={s.sub}>{assignPick.length ? `About ${num(Math.ceil(selectedIds.length / assignPick.length))} each.` : 'Pick one or more people.'}</Text>
+            <View style={s.sheetBtns}>
+              <Button label="Unassign" variant="secondary" onPress={() => runAssign(true)} loading={bulkBusy} style={{ flex: 1 }} />
+              <Button label="Share out" icon="groups" onPress={() => runAssign(false)} loading={bulkBusy} disabled={!assignPick.length} style={{ flex: 1.4 }} />
+            </View>
+          </View>
+        )}
         {bulkSheet === 'status' && BULK_STATUSES.map((o) => (
           <SettingRow key={o.key} icon={o.icon} title={o.label} onPress={() => runBulk('status', { status: o.key }, `Set to ${o.label}`)} />
         ))}
@@ -1068,16 +1639,62 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
         <DialerBar
           auto={auto}
           row={autoRow}
-          prev={auto.called > 0 && auto.phase === 'countdown' ? rows.find((r) => r.id === auto.ids[auto.pos - 1]) || null : null}
+          prev={prevRow}
+          prevWaAt={prevRow ? waAtOf(prevRow) : 0}
           onSms={sms}
+          onWhatsApp={whatsapp}
           attempts={autoRow ? attemptsOf(autoRow) : 0}
           onPause={() => setAuto({ ...auto, phase: 'paused' })}
           onResume={() => setAuto({ ...auto, phase: 'countdown', at: Date.now() + START_MS })}
           onSkip={() => setAuto({ ...auto, pos: auto.pos + 1, phase: 'countdown', at: Date.now() + START_MS })}
           onCallNow={() => setAuto({ ...auto, at: Date.now() })}
+          onNext={() => fnAuto.current.next()}
           onStop={() => stopAuto()}
         />
       )}
+
+      <ImportSheet
+        visible={importOpen}
+        syncEndpoint={syncEndpoint}
+        onClose={() => setImportOpen(false)}
+        onImported={(id, name) => {
+          toast(`“${name}” imported`);
+          addLog(`List #${id} imported from this phone.`);
+          loadLists('pull').then(() => {
+            const l = live.current.lists.find((x: ImportList) => x.id === id);
+            if (l) openList(l);
+          });
+        }}
+      />
+
+      {/* A list's menu: merge it into another (one row per number), or split it into batches. */}
+      <Sheet
+        visible={!!listMenu}
+        onClose={() => { setListMenu(null); setListMenuMode(''); }}
+        title={listMenuMode === 'merge' ? `Merge “${listMenu?.name}” into…` : listMenuMode === 'split' ? `Split “${listMenu?.name}”` : listMenu?.name || ''}
+        subtitle={listMenuMode === 'merge' ? 'Everyone moves into the list you pick; a number on both lists is kept once, with its notes and missed calls added up. This list is then removed.'
+          : listMenuMode === 'split' ? `${num(listMenu?.stored_rows || 0)} people. The first batch stays here; the rest become new lists named “… · batch 2”, “… · batch 3”.` : 'List tools'}
+      >
+        {!listMenuMode && (
+          <>
+            <SettingRow icon="merge_type" title="Merge into another list" desc="Deduplicated: one row per number" onPress={() => setListMenuMode('merge')} />
+            <SettingRow icon="call_split" title="Split into batches" desc="Smaller lists, e.g. 50 people each" onPress={() => setListMenuMode('split')} />
+            {!!listMenu && sheetLinks.some((x) => x.listId === listMenu.id) && (
+              <>
+                <SettingRow icon="refresh" title="Sync from Google Sheet now" desc="Checked every 2 minutes while the app is open" onPress={() => { const id = listMenu.id; setListMenu(null); runSheetSync(id); }} />
+                <SettingRow icon="link_off" title="Stop syncing from the sheet" onPress={() => { const id = listMenu.id; setListMenu(null); unlinkSheet(id); }} />
+              </>
+            )}
+          </>
+        )}
+        {listMenuMode === 'merge' && lists.filter((l) => l.id !== listMenu?.id && l.status === 'ready').map((l) => (
+          <SettingRow key={l.id} icon="format_list_bulleted" title={l.name} desc={`${num(l.stored_rows || l.total_rows)} people`}
+            onPress={() => Alert.alert(`Merge into “${l.name}”?`, `“${listMenu?.name}” is removed afterwards.`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Merge', onPress: () => listAction('merge_lists', { into_id: l.id }, 'Merged') }])} />
+        ))}
+        {listMenuMode === 'split' && [25, 50, 100, 200].filter((n) => (listMenu?.stored_rows || 0) > n).map((n) => (
+          <SettingRow key={n} icon="content_cut" title={`Batches of ${n}`} desc={`${Math.ceil((listMenu?.stored_rows || 0) / n)} lists`} onPress={() => listAction('split_list', { size: n }, 'Split')} />
+        ))}
+      </Sheet>
 
       {/* Note on one person — the same "Called by / Comment & tags" the admin panel shows */}
       <Sheet
@@ -1121,7 +1738,7 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
 
 /* ── one list ── */
 
-const ListCard = memo(({ l, index, onOpen }: { l: ImportList; index: number; onOpen: (l: ImportList, show?: Show) => void }) => {
+const ListCard = memo(({ l, index, onOpen, onPowerDial, onMenu, sheet }: { l: ImportList; index: number; onOpen: (l: ImportList, show?: Show) => void; onPowerDial: (l: ImportList) => void; onMenu: (l: ImportList) => void; sheet?: SheetLink }) => {
   const t = useTheme();
   const s = useStyles();
   const people = l.stored_rows || l.total_rows || 0;
@@ -1131,11 +1748,12 @@ const ListCard = memo(({ l, index, onOpen }: { l: ImportList; index: number; onO
   const left = toCall(l);
   const callNow = ready && left > 0;
   const created = serverTime(l.created_at);
-  const tone = !ready
-    ? { fg: t.c.warning, bg: t.c.warningSoft, icon: 'schedule' as IconName }
-    : callNow
-      ? { fg: t.c.link, bg: t.c.primarySoft, icon: 'format_list_bulleted' as IconName }
-      : { fg: t.c.success, bg: t.c.successSoft, icon: 'task_alt' as IconName };
+  // Pink, blue, amber, purple in turn, so neighbouring lists never look alike.
+  const tone = { ...LIST_TONES(t)[index % 4], icon: 'layers' as IconName };
+  const state = !ready ? { label: 'Uploading', fg: t.c.warning, bg: t.c.warningSoft }
+    : !callNow ? { label: 'Completed', fg: t.c.success, bg: t.c.successSoft }
+    : (l.called || 0) === 0 ? { label: 'Not Started', fg: t.status['Not called'].fg, bg: t.status['Not called'].bg }
+    : { label: 'In Progress', fg: t.c.blue, bg: t.c.blueSoft };
   return (
     <Appear index={index}>
       <Tactile
@@ -1152,23 +1770,20 @@ const ListCard = memo(({ l, index, onOpen }: { l: ImportList; index: number; onO
             <View style={s.metaRow}>
               <IndexBadge n={index + 1} style={{ marginRight: 4 }} />
               <Icon name="groups" size={14} color={t.c.faint} />
-              <Text style={s.listMeta}>{num(people)}</Text>
+              <Text style={s.listMeta}>{num(people)} Contacts</Text>
               <Icon name="event" size={14} color={t.c.faint} style={{ marginLeft: 8 }} />
               <Text style={[s.listMeta, { flexShrink: 1 }]} numberOfLines={1}>{created ? dateOnly(created) : l.file_name}</Text>
             </View>
           </View>
-          {!ready
-            ? <Pill label="Uploading" fg={t.c.warning} bg={t.c.warningSoft} pulse dotColor={t.c.amber} />
-            : callNow
-              ? <Pill label="Ready" fg={t.c.link} bg={t.c.primarySoft} dot />
-              : <Pill label="Done" fg={t.c.success} bg={t.c.successSoft} dot dotColor={t.c.emerald} />}
+          <Pill label={state.label} fg={state.fg} bg={state.bg} dot pulse={!ready} />
+          {ready && <IconButton icon="more_vert" label={`List tools for ${l.name}`} size={32} onPress={() => onMenu(l)} />}
         </View>
 
         <View style={s.progressRow}>
           <Text style={s.progressLabel}>{num(l.called)} of {num(base)} called</Text>
-          <Text style={s.progressPct}>{Math.round(pct * 100)}%</Text>
+          <Text style={[s.progressPct, { color: tone.fg }]}>{Math.round(pct * 100)}%</Text>
         </View>
-        <ProgressBar value={pct} />
+        <ProgressBar value={pct} color={tone.bar} />
 
         <View style={s.miniStats}>
           <MiniStat label="To call" value={left} color={left ? t.c.danger : t.c.muted} />
@@ -1178,16 +1793,19 @@ const ListCard = memo(({ l, index, onOpen }: { l: ImportList; index: number; onO
         </View>
 
         <View style={s.listActions}>
-          <Text style={s.uploader} numberOfLines={1}>{l.created_by_name ? `by ${l.created_by_name}` : l.file_name}</Text>
+          <Text style={[s.uploader, sheet?.error ? { color: t.c.danger } : sheet ? { color: t.c.success } : null]} numberOfLines={1}>
+            {sheet ? (sheet.error ? `Sheet sync failed · ${sheet.error}` : `↻ Google Sheet · ${sheet.lastAt ? ago(sheet.lastAt) : 'linked'}${sheet.lastAdded ? ` · +${sheet.lastAdded}` : ''}`)
+              : l.created_by_name ? `by ${l.created_by_name}` : l.file_name}
+          </Text>
           <Button
-            label={callNow ? 'Call' : 'Open'}
-            icon={callNow ? 'call' : 'chevron_right'}
-            variant={callNow ? 'success' : 'primary'}
+            label={callNow ? 'Start dialer' : 'Open'}
+            icon={callNow ? 'play_arrow' : 'chevron_right'}
+            variant={callNow ? 'primary' : 'secondary'}
             size="sm"
             pill
-            onPress={() => onOpen(l, callNow ? (l.to_call == null ? 'never' : 'to_call') : 'all')}
-            accessibilityLabel={`${callNow ? 'Start calling' : 'Open'} ${l.name}`}
-            style={{ minWidth: 92 }}
+            onPress={() => (callNow ? onPowerDial(l) : onOpen(l, 'all'))}
+            accessibilityLabel={`${callNow ? 'Start the power dialer on' : 'Open'} ${l.name}`}
+            style={{ minWidth: 118 }}
           />
         </View>
       </Tactile>
@@ -1218,12 +1836,15 @@ const BulkButton = ({ icon, label, color, disabled, onPress }: { icon: IconName;
   );
 };
 
-const DialerBar = ({ auto, row, prev, onSms, attempts, onPause, onResume, onSkip, onCallNow, onStop }: {
+const DialerBar = ({ auto, row, prev, prevWaAt, onSms, onWhatsApp, attempts, onPause, onResume, onSkip, onCallNow, onStop, onNext }: {
+  onNext: () => void;
   auto: AutoDial;
   row: ImportRow | null;
-  /** The person just called — offered a quick SMS while the next call counts down. */
+  /** The person just called — offered a WhatsApp or an SMS while the next call counts down. */
   prev: ImportRow | null;
+  prevWaAt: number;
   onSms: (r: ImportRow) => void;
+  onWhatsApp: (r: ImportRow) => void;
   attempts: number;
   onPause: () => void;
   onResume: () => void;
@@ -1242,16 +1863,17 @@ const DialerBar = ({ auto, row, prev, onSms, attempts, onPause, onResume, onSkip
   const secs = Math.max(0, Math.ceil((auto.at - Date.now()) / 1000));
   const total = auto.ids.length;
   const line = auto.phase === 'paused' ? 'Paused'
-    : auto.phase === 'calling' ? 'On the call — the next one waits until you are back'
+    : auto.phase === 'calling' ? 'On the call — the next one waits until it ends'
+    : auto.phase === 'wrapup' ? 'Call ended — log the outcome, then the next call starts'
     : auto.called === 0 && auto.pos === 0 ? `Starting in ${secs}s` : `Calling next in ${secs}s`;
   return (
     <Appear style={s.dialer}>
       <View style={s.dialerHead}>
         {auto.phase === 'paused' ? <Icon name="pause" size={16} color={t.c.warning} /> : <PulseDot color={t.c.emerald} />}
-        <Text style={s.dialerTitle}>Auto-dialing</Text>
+        <Text style={s.dialerTitle}>Power dialer</Text>
         <Text style={s.dialerCount}>{Math.min(auto.pos + 1, total)} of {total}</Text>
         <View style={{ flex: 1 }} />
-        <IconButton icon="stop" label="Stop auto-dialing" size={34} tone="outlined" color={t.c.danger} onPress={onStop} />
+        <IconButton icon="stop" label="Stop the power dialer" size={34} tone="outlined" color={t.c.danger} onPress={onStop} />
       </View>
       <ProgressBar value={total ? auto.pos / total : 0} color={t.c.emerald} />
       {row && (
@@ -1265,10 +1887,24 @@ const DialerBar = ({ auto, row, prev, onSms, attempts, onPause, onResume, onSkip
       )}
       <Text style={[s.dialerLine, auto.phase === 'paused' && { color: t.c.warning }]}>{line}</Text>
       {prev && (
-        <Pressable onPress={() => onSms(prev)} hitSlop={6} accessibilityRole="button" style={s.dialerSms}>
-          <Icon name="sms" size={16} color={t.c.violet} />
-          <Text style={s.dialerSmsText} numberOfLines={1}>No answer? Send {prev.name ? prev.name.split(' ')[0] : 'them'} a quick SMS</Text>
-        </Pressable>
+        <View style={s.dialerFallback}>
+          <Text style={s.dialerFallbackText} numberOfLines={1}>No answer from {prev.name ? prev.name.split(' ')[0] : 'them'}?</Text>
+          {prevWaAt > Date.now() - 10 * 60 * 1000 ? (
+            <View style={s.dialerSms}>
+              <Icon name="check" size={16} color={t.c.success} />
+              <Text style={[s.dialerSmsText, { color: t.c.success }]}>WhatsApp sent</Text>
+            </View>
+          ) : (
+            <Pressable onPress={() => onWhatsApp(prev)} hitSlop={6} accessibilityRole="button" accessibilityLabel={`Send ${prev.name || 'them'} a WhatsApp`} style={s.dialerSms}>
+              <Icon name="chat" size={16} color={t.c.success} />
+              <Text style={[s.dialerSmsText, { color: t.c.success }]}>WhatsApp</Text>
+            </Pressable>
+          )}
+          <Pressable onPress={() => onSms(prev)} hitSlop={6} accessibilityRole="button" accessibilityLabel={`Send ${prev.name || 'them'} a quick SMS`} style={s.dialerSms}>
+            <Icon name="sms" size={16} color={t.c.violet} />
+            <Text style={s.dialerSmsText}>SMS</Text>
+          </Pressable>
+        </View>
       )}
       <View style={s.dialerBtns}>
         {auto.phase === 'paused'
@@ -1278,13 +1914,16 @@ const DialerBar = ({ auto, row, prev, onSms, attempts, onPause, onResume, onSkip
         {auto.phase === 'countdown' && (
           <Button label="Call now" icon="call" variant="success" size="sm" pill onPress={onCallNow} style={{ flex: 1 }} />
         )}
+        {auto.phase === 'wrapup' && (
+          <Button label="Next" icon="skip_next" size="sm" pill onPress={onNext} style={{ flex: 1 }} />
+        )}
       </View>
     </Appear>
   );
 };
 
 /** One live count in a list's summary, coloured by what it means; tapping it filters to those people. */
-const SummaryPill = ({ label, value, color, on, onPress }: { label: string; value: number; color: string; on?: boolean; onPress?: () => void }) => {
+const SummaryPill = ({ label, value, text, extra, color, on, onPress }: { label: string; value?: number; text?: string; extra?: string; color: string; on?: boolean; onPress?: () => void }) => {
   const t = useTheme();
   const s = useStyles();
   return (
@@ -1294,24 +1933,30 @@ const SummaryPill = ({ label, value, color, on, onPress }: { label: string; valu
       unstable_pressDelay={0}
       accessibilityRole="button"
       accessibilityState={{ selected: !!on }}
-      accessibilityLabel={`${label}: ${value}`}
+      accessibilityLabel={`${label}: ${text ?? value}`}
       style={[s.sumPill, on && { borderColor: color, backgroundColor: t.c.surfaceAlt }]}
     >
       <View style={s.sumHead}>
         <View style={[s.sumDot, { backgroundColor: color }]} />
         <Text style={[s.sumLabel, on && { color }]} numberOfLines={1}>{label}</Text>
       </View>
-      <Text style={[s.sumValue, { color }]} numberOfLines={1} adjustsFontSizeToFit>{num(value)}</Text>
+      <Text style={[s.sumValue, { color }]} numberOfLines={1} adjustsFontSizeToFit>{text ?? num(value)}</Text>
+      {!!extra && <Text style={s.sumExtra} numberOfLines={1}>{extra}</Text>}
     </Tactile>
   );
 };
 
 /* ── one person ── */
 
-const PersonCard = memo(({ r, index, attempts, dialledAt, selecting, selected, onToggle, onCall, onNote, onSchedule, onSms }: {
+const PersonCard = memo(({ r, index, listAt, attempts, waAt, dialledAt, selecting, selected, onToggle, onFocus, onCall, onNote, onSchedule, onSms, onWhatsApp }: {
   r: ImportRow;
+  /** Its # (0 when pinned — VIPs sit above #1). */
   index: number;
+  listAt: number;
+  onFocus: (r: ImportRow, index: number) => void;
   attempts: number;
+  /** The last WhatsApp to them, from the panel or just sent from this phone. */
+  waAt: number;
   dialledAt?: number;
   selecting: boolean;
   selected: boolean;
@@ -1320,12 +1965,22 @@ const PersonCard = memo(({ r, index, attempts, dialledAt, selecting, selected, o
   onNote: (r: ImportRow) => void;
   onSchedule: (r: ImportRow) => void;
   onSms: (r: ImportRow) => void;
+  onWhatsApp: (r: ImportRow) => void;
 }) => {
   const t = useTheme();
   const s = useStyles();
   const calling = !!dialledAt && Date.now() - dialledAt < 10 * 60 * 1000;
-  const status = calling ? 'Calling' : rowStatus(r);
-  const st = t.status[status] || t.status['Not called'];
+  const waSent = !!waAt && WA_STATUSES.includes(r.status || '');
+  const replied = !!r.replied_at && !r.dnd && (!r.reply_ack_at || serverTime(r.reply_ack_at) < serverTime(r.replied_at));
+  const status = calling ? 'Calling' : replied ? 'Replied - Priority' : waSent ? 'WhatsApp sent' : rowStatus(r);
+  const st = status === 'Replied - Priority' ? { fg: '#FFFFFF', bg: t.c.violet } : t.status[status] || t.status['Not called'];
+  const since = waitingSince(r, undefined, listAt);
+  const waitMs = since && attempts === 0 ? Date.now() - since : 0;
+  const sla = waitMs > 30 * 60 * 1000;
+  const review = !!r.phone_raw && (!r.phone_norm || r.phone_norm.length !== 10);
+  const offerLeft = serverTime(r.offer_until) - Date.now();
+  const heat = r.heat || 0;
+  const stage = STAGES.find((x) => x.key === r.stage);
   const canCall = !!dialNumber(r);
   const hasNote = !!r.comment || !!r.called_by;
   const maxed = attempts >= MAX_ATTEMPTS;
@@ -1335,35 +1990,48 @@ const PersonCard = memo(({ r, index, attempts, dialledAt, selecting, selected, o
   // Rang with no answer, or they rang us: a text is the next best thing.
   const unanswered = attempts > 0 && ['needs_callback', 'missed_call', 'not_connected'].includes(r.status || '');
   return (
-    <Appear index={index} style={[s.person, maxed && s.personMaxed, calling && s.personActive, selected && s.personSelected]}>
+    <Appear index={index} style={[s.person, maxed && s.personMaxed, sla && s.personSla, replied && s.personReplied, !!r.pinned && s.personPinned, calling && s.personActive, selected && s.personSelected]}>
       <Pressable
-        onPress={selecting ? () => onToggle(r) : undefined}
+        onPress={selecting ? () => onToggle(r) : () => onFocus(r, index + 1)}
         onLongPress={() => onToggle(r)}
         delayLongPress={350}
-        accessibilityHint={selecting ? 'Tap to select or unselect' : 'Long-press to select'}
+        accessibilityHint={selecting ? 'Tap to select or unselect' : 'Tap to open the workspace, long-press to select'}
       >
         <View style={s.personTop}>
           {/* The # column (position in the list as filtered and sorted now), and the checkbox when selecting. */}
           <Tactile
-            onPress={() => onToggle(r)}
+            onPress={selecting ? () => onToggle(r) : () => onFocus(r, index + 1)}
+            onLongPress={() => onToggle(r)}
             scaleTo={0.88}
             unstable_pressDelay={0}
-            accessibilityRole="checkbox"
-            accessibilityState={{ checked: selected }}
-            accessibilityLabel={`Number ${index + 1}${selecting ? (selected ? ', selected' : ', not selected') : ''}`}
-            style={[s.numBox, selected && s.numBoxOn]}
+            accessibilityRole={selecting ? 'checkbox' : 'button'}
+            accessibilityState={selecting ? { checked: selected } : undefined}
+            accessibilityLabel={`${r.pinned ? 'Pinned' : `Number ${index + 1}`}${selecting ? (selected ? ', selected' : ', not selected') : ', open the workspace'}`}
+            style={[s.numBox, !!r.pinned && s.numBoxPinned, selected && s.numBoxOn]}
           >
             {selecting
               ? <Icon name={selected ? 'check_box' : 'check_box_outline_blank'} size={24} color={selected ? t.c.onPrimary : t.c.muted} />
+              : r.pinned ? <Icon name="star" size={22} color={t.c.amber} />
               : <Text style={s.numText} numberOfLines={1} adjustsFontSizeToFit>#{index + 1}</Text>}
           </Tactile>
+          <Avatar name={r.name} phone={r.phone_norm || r.phone_raw} size={42} />
           <View style={{ flex: 1 }}>
             <Text style={s.personName} numberOfLines={1}>{r.name || 'No name'}</Text>
             <Text style={s.personPhone} selectable>{prettyPhone(r.phone_norm || r.phone_raw) || 'No phone number'}</Text>
             {!!r.email && <Text style={s.personEmail} numberOfLines={1}>{r.email}</Text>}
             <View style={s.badgeRow}>
               <AttemptBadge n={attempts} max={MAX_ATTEMPTS} />
+              {heat > 0 && <Pill label={`Heat ${heat}`} icon="local_fire_department" fg={heat >= 70 ? t.c.danger : heat >= 40 ? t.c.orange : t.c.blue} bg={t.c.surfaceAlt} />}
+              {!!stage && stage.key !== 'new' && <Pill label={stage.label} fg={t.c.textSoft} bg={t.c.surfaceAlt} />}
+              {waitMs > 0 && <Pill label={`Waiting: ${waited(waitMs)}`} icon="timer" fg={sla ? t.c.danger : t.c.warning} bg={sla ? t.c.dangerSoft : t.c.warningSoft} pulse={sla} />}
+              {r.best_hour != null && <Pill label={`Best ${hourWindow(r.best_hour)}`} icon="schedule" fg={t.c.success} bg={t.c.successSoft} />}
+              {(r.inbound_missed || 0) > 1 && <Pill label={`Missed ${r.inbound_missed}×`} icon="phone_missed" fg={t.c.danger} bg={t.c.dangerSoft} />}
+              {offerLeft > 0 && <Pill label={`Offer ${waited(offerLeft)} left`} icon="timer" fg={t.c.warning} bg={t.c.warningSoft} />}
+              {review && <Pill label="Needs review" icon="warning_amber" fg={t.c.warning} bg={t.c.warningSoft} />}
+              {!!r.dnd && <Pill label="DND" icon="block" fg="#FFFFFF" bg={t.c.coral} />}
+              {!!r.assigned_to && <Pill label={r.assigned_to === panelDevice() ? 'Mine' : `→ ${agentName(r.assigned_to)}`} icon="person_outline" fg={t.c.link} bg={t.c.primarySoft} />}
               {!!smsAt && <Pill label={`SMS ${ago(smsAt)}${(r.sms_count || 0) > 1 ? ` · ${r.sms_count}×` : ''}`} icon="sms" fg={t.c.violet} bg={t.c.violetSoft} />}
+              {!!waAt && <Pill label={`WhatsApp ${ago(waAt)}${(r.wa_count || 0) > 1 ? ` · ${r.wa_count}×` : ''}`} icon="chat" fg={t.c.success} bg={t.c.successSoft} />}
               {!!due && (
                 <Pill
                   label={overdue ? `Due ${dueIn(due)}` : callbackTime(due)}
@@ -1380,6 +2048,12 @@ const PersonCard = memo(({ r, index, attempts, dialledAt, selecting, selected, o
           </View>
         </View>
 
+        {replied && !!r.reply_text && (
+          <View style={s.replyLine}>
+            <Icon name="chat_bubble_outline" size={15} color={t.c.violet} />
+            <Text style={s.replyText} numberOfLines={2}>“{r.reply_text}” · {ago(serverTime(r.replied_at))}</Text>
+          </View>
+        )}
         {(r.total || 0) > 0 && (
           <View style={s.callsLine}>
             <Icon name="history" size={15} color={t.c.muted} />
@@ -1417,31 +2091,135 @@ const PersonCard = memo(({ r, index, attempts, dialledAt, selecting, selected, o
             disabled={!canCall}
             onPress={() => onSms(r)}
           />
-          <Button
-            label={due ? 'Reschedule' : 'Schedule'}
+          <IconButton
+            icon="chat"
+            label={`Send a WhatsApp to ${r.name || prettyPhone(r.phone_norm)}`}
+            size={36}
+            tone="soft"
+            color={unanswered && !waSent ? t.c.success : '#16A34A'}
+            disabled={!canCall || !!r.dnd}
+            onPress={() => onWhatsApp(r)}
+          />
+          {/* An icon, so five actions fit a small phone; the time set shows in the pill above. */}
+          <IconButton
             icon="alarm"
-            variant="secondary"
-            size="sm"
+            label={`${due ? 'Reschedule the' : 'Schedule a'} callback for ${r.name || prettyPhone(r.phone_norm)}`}
+            size={36}
+            tone={due ? 'soft' : 'outlined'}
+            color={due ? t.c.blue : undefined}
             disabled={!canCall}
             onPress={() => onSchedule(r)}
-            accessibilityLabel={`Schedule a callback for ${r.name || prettyPhone(r.phone_norm)}`}
           />
-          <Button
-            label="Call"
-            icon="call"
-            size="sm"
-            variant="success"
-            pill
-            disabled={!canCall}
+          <Tactile
             onPress={() => onCall(r)}
+            disabled={!canCall}
+            scaleTo={0.88}
+            unstable_pressDelay={0}
+            accessibilityRole="button"
             accessibilityLabel={`Call ${r.name || prettyPhone(r.phone_norm)}`}
-            style={{ minWidth: 84 }}
-          />
+            style={[s.callRound, !canCall && { opacity: 0.4 }]}
+          >
+            <Icon name="call" size={20} color={t.c.success} />
+          </Tactile>
         </View>
       </Pressable>
     </Appear>
   );
 });
+
+/* Agent names for the "→ Ravi" pill, filled once the team is read. */
+let agentNames: { [device: string]: string } = {};
+const agentName = (d: string) => agentNames[d] || d.slice(0, 8);
+
+/** The deal fields of a row, as the Focus workspace takes them. */
+const rowMeta = (r: ImportRow): Meta => ({
+  ...EMPTY_META,
+  stage: (r.stage || '') as Meta['stage'], sentiment: (r.sentiment || '') as Meta['sentiment'], bant: r.bant || 0, heat: r.heat || 0,
+  lost_reason: (r.lost_reason || '') as Meta['lost_reason'], offer_until: r.offer_until || null, dnd: r.dnd || 0,
+  replied_at: r.replied_at || null, reply_text: r.reply_text || '', reply_ack_at: r.reply_ack_at || null,
+});
+
+/** Since when a lead still owed a call has been waiting: when they called us, else since the list came in. */
+function waitingSince(r: ImportRow, listCreated?: string | null, listAt?: number): number {
+  if (!['needs_callback', 'missed_call', 'not_called'].includes(r.status || '')) return 0;
+  return serverTime(r.lead_at) || listAt || serverTime(listCreated) || 0;
+}
+
+const hm = (sec: number) => `${String(Math.floor(sec / 3600)).padStart(2, '0')}h ${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}m`;
+
+/* ── Board: one column per deal stage; ◀ ▶ move a lead along ── */
+const Board = ({ listId, ask, onOpen, onMove, attemptsOf }: {
+  listId: number;
+  ask: (body: any, ms?: number) => Promise<any>;
+  onOpen: (r: ImportRow, index: number) => void;
+  onMove: (r: ImportRow, stage: Stage) => Promise<void>;
+  attemptsOf: (r: ImportRow) => number;
+}) => {
+  const t = useTheme();
+  const s = useStyles();
+  const [cols, setCols] = useState<{ [k: string]: { rows: ImportRow[]; total: number } }>({});
+  const [loading, setLoading] = useState<boolean>(true);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const got = await Promise.all(STAGES.map((st) => ask({ action: 'detail', id: listId, page: 1, per_page: 100, sort: 'row', dir: 'asc', show: `stage_${st.key}`, max: MAX_ATTEMPTS })
+        .then((d) => [st.key, { rows: d.rows || [], total: Number(d.total) || 0 }] as const).catch(() => [st.key, { rows: [], total: 0 }] as const)));
+      setCols(Object.fromEntries(got));
+    } finally {
+      setLoading(false);
+    }
+  }, [listId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [load]);
+
+  const move = async (r: ImportRow, from: number, dir: -1 | 1) => {
+    const to = STAGES[from + dir];
+    if (!to) return;
+    // Moves on the board at once; the panel catches up.
+    setCols((c) => {
+      const a = c[STAGES[from].key]; const b = c[to.key];
+      return { ...c, [STAGES[from].key]: { rows: a.rows.filter((x) => x.id !== r.id), total: a.total - 1 }, [to.key]: { rows: [{ ...r, stage: to.key }, ...b.rows], total: b.total + 1 } };
+    });
+    await onMove(r, to.key);
+  };
+
+  return (
+    <ScrollView horizontal contentContainerStyle={s.board} showsHorizontalScrollIndicator={false}>
+      {STAGES.map((st, ci) => {
+        const col = cols[st.key] || { rows: [], total: 0 };
+        const color = (t.c as any)[st.color] || t.c.muted;
+        return (
+          <View key={st.key} style={s.col}>
+            <View style={s.colHead}>
+              <View style={[s.sumDot, { backgroundColor: color }]} />
+              <Text style={s.colTitle}>{st.label}</Text>
+              <Text style={s.colCount}>{num(col.total)}</Text>
+            </View>
+            {loading && !col.rows.length ? <ActivityIndicator color={t.c.primary} /> : null}
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 8, paddingBottom: 40 }}>
+              {col.rows.map((r, i) => (
+                <Pressable key={r.id} onPress={() => onOpen(r, i + 1)} style={s.boardCard} accessibilityRole="button">
+                  <View style={s.boardTop}>
+                    <Text style={s.boardNum}>#{i + 1}</Text>
+                    <Text style={s.boardName} numberOfLines={1}>{r.name || prettyPhone(r.phone_norm)}</Text>
+                    {(r.heat || 0) > 0 && <Text style={[s.boardHeat, { color: (r.heat || 0) >= 70 ? t.c.danger : t.c.orange }]}>🔥{r.heat}</Text>}
+                  </View>
+                  <Text style={s.boardMeta} numberOfLines={1}>{prettyPhone(r.phone_norm || r.phone_raw)} · {attemptsOf(r)}/{MAX_ATTEMPTS} tries</Text>
+                  <View style={s.boardMove}>
+                    <IconButton icon="chevron_left" label={`Move back to ${STAGES[ci - 1]?.label || ''}`} size={30} tone="outlined" disabled={ci === 0} onPress={() => move(r, ci, -1)} />
+                    <View style={{ flex: 1 }} />
+                    <IconButton icon="chevron_right" label={`Move on to ${STAGES[ci + 1]?.label || ''}`} size={30} tone="outlined" disabled={ci === STAGES.length - 1} onPress={() => move(r, ci, 1)} />
+                  </View>
+                </Pressable>
+              ))}
+              {!loading && !col.rows.length && <Text style={s.colEmpty}>Nobody here</Text>}
+              {col.total > col.rows.length && <Text style={s.colEmpty}>+{num(col.total - col.rows.length)} more — use the list view</Text>}
+            </ScrollView>
+          </View>
+        );
+      })}
+    </ScrollView>
+  );
+};
 
 export default memo(ImportsScreen);
 
@@ -1456,11 +2234,10 @@ const useStyles = makeStyles((t) => ({
   bento: { flexDirection: 'row', gap: space.sm, marginTop: space.lg, marginBottom: space.lg },
 
   card: {
-    backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: t.c.border,
-    padding: space.lg, marginBottom: space.md, overflow: 'hidden',
+    backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginBottom: space.md, ...elevation(t),
   },
   listHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  listIcon: { width: 44, height: 44, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
+  listIcon: { width: 46, height: 46, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   listName: { ...type.cardTitle, color: t.c.text },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
   listMeta: { fontSize: 12.5, color: t.c.muted, fontWeight: '500' },
@@ -1480,7 +2257,7 @@ const useStyles = makeStyles((t) => ({
   detailHead: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: space.lg },
   summary: { flexDirection: 'row', gap: 6, marginBottom: space.md },
   sumPill: {
-    flex: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: t.c.border,
+    flexBasis: '31%', flexGrow: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: 'transparent', ...elevation(t),
     paddingHorizontal: 9, paddingVertical: 9,
   },
   sumHead: { flexDirection: 'row', alignItems: 'center', gap: 5 },
@@ -1489,26 +2266,35 @@ const useStyles = makeStyles((t) => ({
   sumValue: { ...type.metric, fontSize: 19, marginTop: 4 },
 
   person: {
-    backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: t.c.border,
-    padding: 14, marginBottom: 10,
+    backgroundColor: t.c.surface, borderRadius: radius.xl, borderWidth: 1, borderColor: 'transparent',
+    padding: 14, marginBottom: 10, ...elevation(t),
   },
+  callRound: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.c.successSoft, alignItems: 'center', justifyContent: 'center' },
   personActive: { borderColor: t.c.emerald, backgroundColor: t.c.successSoft },
   personTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  numBox: { width: 40, height: 40, borderRadius: radius.md, backgroundColor: t.c.surfaceAlt, borderWidth: 1, borderColor: t.c.border, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
-  numText: { fontSize: 13.5, fontWeight: '800', color: t.c.textSoft, fontVariant: ['tabular-nums'] },
+  numBox: { width: 34, height: 34, borderRadius: 10, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2 },
+  numText: { fontSize: 12.5, fontWeight: '800', color: t.c.link, fontVariant: ['tabular-nums'] },
   rowNo: { fontSize: 11, color: t.c.faint, fontWeight: '600' },
   personName: { fontSize: 15, fontWeight: '600', color: t.c.text },
   personPhone: { fontSize: 14, color: t.c.textSoft, marginTop: 3, letterSpacing: 0.2 },
   personEmail: { fontSize: 12, color: t.c.muted, marginTop: 2 },
-  callsLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginLeft: 52 },
+  callsLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginLeft: 98 },
   personCalls: { flex: 1, fontSize: 12, color: t.c.muted },
-  noteBox: { marginTop: 10, marginLeft: 52, backgroundColor: t.c.surfaceAlt, borderRadius: radius.md, padding: 10 },
+  noteBox: { marginTop: 10, marginLeft: 98, backgroundColor: t.c.surfaceAlt, borderRadius: radius.md, padding: 10 },
   noteText: { fontSize: 13, color: t.c.textSoft, fontStyle: 'italic', marginBottom: 6, lineHeight: 18 },
   tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   tag: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.border, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3 },
   tagText: { fontSize: 11.5, color: t.c.textSoft, fontWeight: '600' },
   personActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 14 },
   personMaxed: { borderColor: t.c.coral, borderWidth: 1.5 },
+  personSla: { borderColor: t.c.danger, borderWidth: 2, backgroundColor: t.c.dangerSoft },
+  personReplied: { borderColor: t.c.violet, borderWidth: 2 },
+  personPinned: { borderColor: t.c.amber, borderWidth: 1.5 },
+  numBoxPinned: { backgroundColor: t.c.warningSoft, borderColor: t.c.amber },
+  replyLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10, marginLeft: 98 },
+  replyText: { flex: 1, fontSize: 12.5, color: t.c.violet, fontWeight: '600' },
+  summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: space.md },
+  sumExtra: { fontSize: 10.5, color: t.c.muted, marginTop: 1 },
   personSelected: { borderColor: t.c.primary, borderWidth: 1.5, backgroundColor: t.c.primarySoft },
   numBoxOn: { backgroundColor: t.c.primary, borderColor: t.c.primary },
   selectRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: space.md },
@@ -1522,7 +2308,12 @@ const useStyles = makeStyles((t) => ({
   bulkBtns: { flexDirection: 'row', gap: 8 },
   bulkBtn: { flex: 1, alignItems: 'center', gap: 4, paddingVertical: 10, borderRadius: radius.md, backgroundColor: t.c.surfaceAlt },
   bulkBtnText: { fontSize: 12, fontWeight: '700', color: t.c.link },
-  dialerSms: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start' },
+  dialerSms: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 4, paddingHorizontal: 8, borderRadius: radius.pill, backgroundColor: t.c.surfaceAlt },
+  dialerFallback: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dialerFallbackText: { flex: 1, fontSize: 12.5, fontWeight: '600', color: t.c.textSoft },
+  selectAll: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: space.md },
+  firstLabel: { fontSize: 12, fontWeight: '700', color: t.c.muted, marginBottom: 6 },
+  customRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginTop: -6, marginBottom: space.sm },
   dialerSmsText: { fontSize: 12.5, fontWeight: '700', color: t.c.violet },
   badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
 
@@ -1539,6 +2330,19 @@ const useStyles = makeStyles((t) => ({
   dialerBtns: { flexDirection: 'row', gap: 8 },
 
   footer: { alignItems: 'center', paddingVertical: space.lg },
+  board: { paddingHorizontal: space.lg, paddingBottom: space.lg, gap: 10 },
+  col: { width: 270, backgroundColor: t.c.surfaceAlt, borderRadius: radius.lg, padding: 10 },
+  colHead: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
+  colTitle: { flex: 1, fontSize: 13.5, fontWeight: '800', color: t.c.text },
+  colCount: { fontSize: 12.5, fontWeight: '700', color: t.c.muted },
+  colEmpty: { fontSize: 12, color: t.c.faint, textAlign: 'center', paddingVertical: 10 },
+  boardCard: { backgroundColor: t.c.surface, borderRadius: radius.md, borderWidth: 1, borderColor: t.c.border, padding: 10 },
+  boardTop: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  boardNum: { fontSize: 12, fontWeight: '800', color: t.c.muted },
+  boardName: { flex: 1, fontSize: 14, fontWeight: '600', color: t.c.text },
+  boardHeat: { fontSize: 12, fontWeight: '800' },
+  boardMeta: { fontSize: 12, color: t.c.muted, marginTop: 3 },
+  boardMove: { flexDirection: 'row', marginTop: 8 },
   footerText: { fontSize: 12, color: t.c.muted },
 
   sheetBtns: { flexDirection: 'row', gap: 10, marginTop: space.lg },
