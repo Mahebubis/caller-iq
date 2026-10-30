@@ -16,9 +16,11 @@ import java.util.concurrent.TimeUnit
 class UssdWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
+        // The recharge reminders do not depend on the check: keep them armed every day either way.
+        SimValidity.armAll(applicationContext)
         if (!CallIqConfig.ussdEnabled(applicationContext)) return Result.success()
         Log.d("UssdWorker", "Daily SIM balance check")
-        UssdChecker.checkAll(applicationContext)
+        UssdChecker.checkAllAndWait(applicationContext)
         return Result.success()
     }
 

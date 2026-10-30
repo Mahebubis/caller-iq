@@ -19,6 +19,7 @@ class BootReceiver : BroadcastReceiver() {
                 CallMonitorService.start(context.applicationContext)
                 // Alarms do not survive a reboot; callback reminders are armed again from prefs.
                 CallbackReminders.rearmAll(context.applicationContext)
+                SimValidity.armAll(context.applicationContext)
             }
         }
     }

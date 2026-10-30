@@ -495,6 +495,33 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Each SIM's plan end date ({ "1": { date, source }, … }) for the SIM sheet. */
+    @ReactMethod
+    fun getSimValidity(promise: Promise) {
+        try {
+            val ctx = reactApplicationContext
+            promise.resolve(Arguments.createMap().apply {
+                for (slot in 1..2) putMap(slot.toString(), Arguments.createMap().apply {
+                    putString("date", SimValidity.date(ctx, slot))
+                    putString("source", SimValidity.source(ctx, slot))
+                })
+            })
+        } catch (e: Throwable) {
+            promise.reject("sim_validity_failed", e)
+        }
+    }
+
+    /** Sets (yyyy-MM-dd) or clears ("") a SIM's plan end date by hand; arms its recharge reminder. */
+    @ReactMethod
+    fun setSimValidity(slot: Int, date: String, promise: Promise) {
+        try {
+            SimValidity.set(reactApplicationContext, slot, date, "manual")
+            promise.resolve(true)
+        } catch (e: Throwable) {
+            promise.reject("sim_validity_failed", e.message ?: "Not saved", e)
+        }
+    }
+
     /** Runs the code now and resolves with whatever the operator replied. */
     @ReactMethod
     fun checkSimBalance(slot: Int, promise: Promise) {

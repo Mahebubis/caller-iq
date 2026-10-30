@@ -180,6 +180,8 @@ object UssdChecker {
 
         val url = CallIqConfig.endpoint(app).replace("log_call.php", "sim_status.php")
         Thread { CallPresence.post(url, body) }.start()
+        // When the operator names the plan's end date, it becomes the date the recharge reminder uses.
+        if (ok) parseValidTill(text)?.let { try { SimValidity.set(app, slot, it, "auto") } catch (_: Throwable) {} }
         CallIqConfig.prefs(app).edit()
             .putString("USSD_LAST_$slot", text)
             .putLong("USSD_LAST_AT_$slot", System.currentTimeMillis())
@@ -192,14 +194,28 @@ object UssdChecker {
     fun lastCheckedAt(context: Context, slot: Int): Long =
         CallIqConfig.prefs(context).getLong("USSD_LAST_AT_$slot", 0L)
 
-    /** Every SIM in the phone, one after another — what the daily check runs. */
-    fun checkAll(context: Context) {
+    /**
+     * The daily check, from [UssdWorker]: every SIM one after another, waiting for each operator's
+     * reply (up to 45 s) and 20 s between SIMs. The worker stays alive until the last reply is in;
+     * firing them off with delays and returning at once let Android stop the job before the second
+     * SIM was asked or the first answer had arrived.
+     */
+    suspend fun checkAllAndWait(context: Context) {
         val app = context.applicationContext
-        val subs = SimResolver.activeSubscriptions(app)
-        subs.forEachIndexed { i, info ->
-            val slot = info.simSlotIndex + 1
-            // Staggered: two USSD requests at once confuse the radio.
-            Handler(Looper.getMainLooper()).postDelayed({ check(app, slot, null) }, i * 20_000L)
+        val slots = SimResolver.activeSubscriptions(app).map { it.simSlotIndex + 1 }
+        slots.forEachIndexed { i, slot ->
+            if (i > 0) kotlinx.coroutines.delay(20_000L)
+            kotlinx.coroutines.withTimeoutOrNull(45_000L) {
+                kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+                    Handler(Looper.getMainLooper()).post {
+                        check(app, slot, object : Result {
+                            override fun onDone(slot: Int, ok: Boolean, text: String) {
+                                if (cont.isActive) cont.resumeWith(kotlin.Result.success(Unit))
+                            }
+                        })
+                    }
+                }
+            }
         }
     }
 
