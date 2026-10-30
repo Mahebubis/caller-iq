@@ -3,7 +3,8 @@ import { ActivityIndicator, Modal, NativeModules, Pressable, ScrollView, Text, T
 import { makeStyles, radius, space, type, useTheme } from '../theme';
 import { ago, callbackTime, prettyPhone, serverTime } from '../format';
 import { AttemptBadge, Button, Chip, ChipBar, Field, Icon, IconButton, Pill, ProgressBar, Segmented } from '../ui';
-import { useToast } from '../ui';
+import { Banner, ToastProvider, useToast } from '../ui';
+import { errorKind } from '../api';
 import { MAX_ATTEMPTS, ScheduleTarget, SmsTarget } from '../types';
 import {
   BANT, bantPct, crm, EMPTY_META, heatScore, hourWindow, LOST_REASONS, LostReason, Meta, native, SENTIMENTS, Sentiment, Stage, STAGES,
@@ -82,7 +83,18 @@ const KIND_ICON: { [k: string]: { icon: any; label: string } } = {
 export default function FocusSheet(p: Props) {
   const t = useTheme();
   const s = useStyles();
-  const toast = useToast();
+  /* Focus is a full-screen Modal: a toast from the app's root would be drawn behind it, so a save
+     that failed looked like nothing happened. Messages go to a toast layer inside the Modal. */
+  const appToast = useToast();
+  const toastRef = useRef(appToast);
+  const toast = useCallback((msg: string, tone?: 'default' | 'error') => toastRef.current(msg, tone), []);
+  // The panel's deal tools (crm.php) unreachable or not installed: said once, on top, with Retry.
+  const [panelDown, setPanelDown] = useState<'missing' | 'other' | null>(null);
+  const [panelMsg, setPanelMsg] = useState<string>('');
+  const notePanel = useCallback((e: any) => {
+    setPanelDown(errorKind(e) === 'missing' || errorKind(e) === 'outdated' ? 'missing' : 'other');
+    setPanelMsg(e?.message || String(e));
+  }, []);
   const wa = useWaSend();
   const points = usePoints();
   const undo = useUndo();
@@ -118,12 +130,13 @@ export default function FocusSheet(p: Props) {
       const d = await crm.timeline(number);
       setItems(d.items);
       if (d.meta) setMeta({ ...EMPTY_META, ...d.meta });
+      setPanelDown(null);
     } catch (e: any) {
-      toast(`Timeline not loaded — ${e?.message || e}`, 'error');
+      notePanel(e);
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [notePanel]);
 
   useEffect(() => {
     if (!tg) return;
@@ -198,9 +211,10 @@ export default function FocusSheet(p: Props) {
       }
     } catch (e: any) {
       setMeta(before);
+      notePanel(e);
       toast(`Not saved — ${e?.message || e}`, 'error');
     }
-  }, [p, points, undo, toast]);
+  }, [p, points, undo, toast, notePanel]);
 
   if (!tg) return null;
 
@@ -360,6 +374,8 @@ export default function FocusSheet(p: Props) {
 
   return (
     <Modal visible={!!tg} animationType="slide" onRequestClose={p.onClose}>
+      <ToastProvider>
+      <GrabToast into={toastRef} />
       <View style={s.screen}>
         {/* Header */}
         <View style={s.head}>
@@ -383,6 +399,20 @@ export default function FocusSheet(p: Props) {
             {waitingMs > 0 && <Pill label={`Waiting ${waited(waitingMs)}`} icon="timer" fg={waitingMs > 30 * 60000 ? t.c.danger : t.c.warning} bg={waitingMs > 30 * 60000 ? t.c.dangerSoft : t.c.warningSoft} pulse={waitingMs > 30 * 60000} />}
             {!!meta.dnd && <Pill label="DND" icon="block" fg="#FFFFFF" bg={t.c.coral} />}
           </View>
+
+          {!!panelDown && (
+            <Banner
+              tone={panelDown === 'missing' ? 'warning' : 'danger'}
+              icon={panelDown === 'missing' ? 'dns' : 'wifi_off'}
+              title={panelDown === 'missing' ? 'Deal tools need the updated panel' : 'Couldn’t reach the panel'}
+              message={panelDown === 'missing'
+                ? 'Stage, qualification (BANT), competitor, offer plans and this person’s report are saved on the panel, and crm.php isn’t on it yet. The admin needs to upload crm.php and crm_lib.php to api/caller-iq/.'
+                : `${panelMsg}. Changes here won’t save until the panel answers.`}
+              actionLabel="Retry"
+              actionBusy={loading}
+              onAction={() => load(number)}
+            />
+          )}
 
           {replied && (
             <View style={s.reply}>
@@ -611,9 +641,16 @@ export default function FocusSheet(p: Props) {
           })}
         </ScrollView>
       </View>
+      </ToastProvider>
     </Modal>
   );
 }
+
+/** Hands the Modal's own toast to FocusSheet, which renders the provider and so cannot use its hook. */
+const GrabToast = ({ into }: { into: React.MutableRefObject<(msg: string, tone?: 'default' | 'error') => void> }) => {
+  into.current = useToast();
+  return null;
+};
 
 const clockLeft = (ms: number) => {
   const sec = Math.max(0, Math.floor(ms / 1000));
