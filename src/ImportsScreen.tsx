@@ -1010,9 +1010,9 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       <View style={s.bento}>
         {lists.length ? (
           <>
-            <MetricTile icon="format_list_bulleted" label="Lists" value={num(lists.length)} fg={t.c.link} bg={t.c.primarySoft} />
-            <MetricTile icon="groups" label="Contacts" value={num(totals.people)} fg={t.c.violet} bg={t.c.violetSoft} />
-            <MetricTile icon="phone_in_talk" label="Ready to call" value={num(totals.ready)} fg={t.c.success} bg={t.c.successSoft} />
+            <MetricTile icon="format_list_bulleted" label="Lists" value={num(lists.length)} fg={t.tints.sky.fg} bg={t.tints.sky.bg} />
+            <MetricTile icon="groups" label="Contacts" value={num(totals.people)} fg={t.tints.peach.fg} bg={t.tints.peach.bg} />
+            <MetricTile icon="phone_in_talk" label="To call" value={num(totals.ready)} fg={t.tints.mint.fg} bg={t.tints.mint.bg} />
           </>
         ) : listsLoading ? (
           [0, 1, 2].map((i) => <Skeleton key={i} height={104} r={radius.lg} style={{ flex: 1 }} />)

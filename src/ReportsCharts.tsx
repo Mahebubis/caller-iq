@@ -20,21 +20,20 @@ export function ReportsKpis({ mix, talkSec, points }: { mix: CallMix; talkSec: n
   const t = useTheme();
   const s = useStyles();
   const rate = mix.total ? Math.round((mix.connected / mix.total) * 100) : 0;
-  const items: { icon: IconName; label: string; value: string; fg: string; bg: string }[] = [
-    { icon: 'call', label: 'Total Calls', value: num(mix.total), fg: t.c.success, bg: t.c.successSoft },
-    { icon: 'phone_in_talk', label: 'Connected', value: `${rate}%`, fg: t.c.blue, bg: t.c.blueSoft },
-    { icon: 'timer', label: 'Talk Time', value: talk(talkSec), fg: t.c.warning, bg: t.c.warningSoft },
-    { icon: 'bolt', label: 'Points', value: num(points), fg: t.c.danger, bg: t.c.dangerSoft },
+  // Pastel stat cards, the same as Home's: the tint is the card, the number is the hero.
+  const items: { icon: IconName; label: string; value: string; tint: { bg: string; fg: string } }[] = [
+    { icon: 'call', label: 'Total calls', value: num(mix.total), tint: t.tints.peach },
+    { icon: 'phone_in_talk', label: 'Connected', value: `${rate}%`, tint: t.tints.mint },
+    { icon: 'timer', label: 'Talk time', value: talk(talkSec), tint: t.tints.sky },
+    { icon: 'bolt', label: 'Points', value: num(points), tint: t.tints.butter },
   ];
   return (
     <View style={s.kpis}>
       {items.map((k) => (
-        <View key={k.label} style={s.kpi} accessible accessibilityLabel={`${k.label}: ${k.value}`}>
-          <View style={[s.kpiIcon, { backgroundColor: k.bg }]}><Icon name={k.icon} size={20} color={k.fg} /></View>
-          <View style={{ flex: 1 }}>
-            <Text style={s.kpiLabel} numberOfLines={1}>{k.label}</Text>
-            <Text style={s.kpiValue} numberOfLines={1} adjustsFontSizeToFit>{k.value}</Text>
-          </View>
+        <View key={k.label} style={[s.kpi, { backgroundColor: k.tint.bg }]} accessible accessibilityLabel={`${k.label}: ${k.value}`}>
+          <View style={s.kpiIcon}><Icon name={k.icon} size={18} color={k.tint.fg} /></View>
+          <Text style={s.kpiValue} numberOfLines={1} adjustsFontSizeToFit>{k.value}</Text>
+          <Text style={[s.kpiLabel, { color: k.tint.fg }]} numberOfLines={1}>{k.label}</Text>
         </View>
       ))}
     </View>
@@ -181,10 +180,10 @@ export function TopSegments({ lists }: { lists: ImportList[] }) {
 
 const useStyles = makeStyles((t) => ({
   kpis: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: space.lg },
-  kpi: { flexBasis: '47%', flexGrow: 1, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.c.surface, borderRadius: 18, padding: 12, ...elevation(t) },
-  kpiIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  kpiLabel: { fontSize: 12, fontWeight: '600', color: t.c.muted },
-  kpiValue: { ...type.metric, color: t.c.text },
+  kpi: { flexBasis: '47%', flexGrow: 1, borderRadius: radius.xl, padding: 14 },
+  kpiIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(255,255,255,0.75)', alignItems: 'center', justifyContent: 'center' },
+  kpiLabel: { fontSize: 13.5, fontWeight: '700', marginTop: 1 },
+  kpiValue: { fontSize: 30, fontWeight: '800', letterSpacing: -1, color: t.c.text, marginTop: 10, fontVariant: ['tabular-nums'] },
   card: { backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginTop: space.md, ...elevation(t) },
   cardTitle: { ...type.heading, color: t.c.text },
   donutRow: { flexDirection: 'row', alignItems: 'center', gap: space.lg, marginTop: space.md },

@@ -133,10 +133,11 @@ const buildFeed = (calls: CallLogItem[], tasks: Owed[]): { alerts: Owed[]; items
   return { alerts, items: Array.from(byKey.values()).sort((a, b) => b.at - a.at).slice(0, FEED_MAX) };
 };
 
-const FEED_KIND: { [k in FeedKind]: { label: string; icon: IconName; tone: 'success' | 'danger' | 'blue' } } = {
-  callback: { label: 'Asked for a callback', icon: 'phone_callback', tone: 'blue' },
-  missed: { label: 'Missed call', icon: 'phone_missed', tone: 'danger' },
-  scheduled: { label: 'Callback', icon: 'alarm', tone: 'blue' },
+// `short` fits the tag on a card beside the time; `label` is read out in full.
+const FEED_KIND: { [k in FeedKind]: { label: string; short: string; icon: IconName; tone: 'success' | 'danger' | 'blue' } } = {
+  callback: { label: 'Asked for a callback', short: 'Callback', icon: 'phone_callback', tone: 'blue' },
+  missed: { label: 'Missed call', short: 'Missed', icon: 'phone_missed', tone: 'danger' },
+  scheduled: { label: 'Callback', short: 'Callback', icon: 'alarm', tone: 'blue' },
 };
 
 const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onFocus }: {
@@ -245,12 +246,12 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onFoc
           return (
             <Appear key={it.key} index={i} style={s.feedRow}>
               <Avatar name={it.name} phone={it.number} size={46} />
-              <Pressable style={{ flex: 1 }} onPress={() => onFocus({ number: it.number, name: it.name, segment: it.segment, attempts: it.tries })} accessibilityRole="button" accessibilityLabel={`Open ${it.name || number}`}>
+              <Pressable style={{ flex: 1 }} onPress={() => onFocus({ number: it.number, name: it.name, segment: it.segment, attempts: it.tries })} accessibilityRole="button" accessibilityLabel={`Open ${it.name || number}, ${k.label}`}>
                 <Text style={s.feedName} numberOfLines={1}>{it.name || number}</Text>
                 <View style={s.feedTagRow}>
                   <View style={[s.feedTag, { backgroundColor: tint.bg }]}>
                     <Icon name={k.icon} size={13} color={tint.fg} />
-                    <Text style={[s.feedTagText, { color: tint.fg }]} numberOfLines={1}>{it.kind === 'scheduled' ? callbackTime(it.at) : k.label}</Text>
+                    <Text style={[s.feedTagText, { color: tint.fg }]} numberOfLines={1}>{it.kind === 'scheduled' ? callbackTime(it.at) : k.short}</Text>
                   </View>
                   <Text style={s.feedMeta} numberOfLines={1}>{it.kind === 'scheduled' ? dueIn(it.at) : ago(it.at)}</Text>
                 </View>
@@ -371,7 +372,7 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
             const left = toCall(l);
             const start: Show = l.to_call == null ? 'never' : 'to_call';
             const pct = Math.min(1, (l.called || 0) / base);
-            const tint = [t.tints.sky, t.tints.peach, t.tints.berry, t.tints.mint, t.tints.butter, t.tints.rose][i % 6];
+            const tint = [t.tints.sky, t.tints.peach, t.tints.berry, t.tints.mint][i % 4];   // = LIST_TONES
             return (
               <Tactile
                 key={l.id}
@@ -564,7 +565,7 @@ const useStyles = makeStyles((t) => ({
   },
   feedName: { fontSize: 15.5, fontWeight: '700', letterSpacing: -0.2, color: t.c.text, fontVariant: ['tabular-nums'] },
   feedTagRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 5 },
-  feedTag: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 1 },
+  feedTag: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 0 },
   feedTagText: { fontSize: 12, fontWeight: '700' },
   feedMeta: { fontSize: 12.5, fontWeight: '500', color: t.c.muted },
   feedEmptyCard: { flexDirection: 'row', alignItems: 'center', gap: 12 },

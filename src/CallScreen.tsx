@@ -3,7 +3,7 @@ import { Animated, Easing, Modal, NativeModules, PermissionsAndroid, Platform, P
 import { makeStyles, radius, space, type, useTheme } from './theme';
 import { prettyPhone } from './format';
 import { Icon, IconName, useToast } from './ui';
-import { Avatar, Gradient } from './art';
+import { Avatar, BRAND, Gradient } from './art';
 import { crm } from './crm';
 import type { ActiveCall, Disposition } from './MiniCallBar';
 import { DISPOSITIONS } from './MiniCallBar';
@@ -268,7 +268,7 @@ const GlassButton = ({ icon, label, onPress, on, small }: { icon: IconName; labe
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: !!on }} style={({ pressed }) => [s.glassItem, small && { flex: 1 }, pressed && { opacity: 0.7 }]}>
       <View style={[s.glass, small && { width: 48, height: 48, borderRadius: 24 }, on && s.glassOn]}>
-        <Icon name={icon} size={small ? 22 : 26} color={on ? '#6E1432' : '#FFFFFF'} />
+        <Icon name={icon} size={small ? 22 : 26} color={on ? BRAND.night : '#FFFFFF'} />
       </View>
       <Text style={s.glassText}>{label}</Text>
     </Pressable>
@@ -279,15 +279,15 @@ const useStyles = makeStyles(() => ({
   screen: { flex: 1, paddingHorizontal: space.xl, paddingTop: space.xxl, paddingBottom: space.xxl, justifyContent: 'space-between' },
   top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   topBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
-  topText: { flex: 1, textAlign: 'center', color: 'rgba(255,255,255,0.88)', fontSize: 14, fontWeight: '700', letterSpacing: 0.4 },
+  topText: { flex: 1, textAlign: 'center', color: 'rgba(255,255,255,0.88)', fontSize: 14, fontWeight: '700' },
   center: { alignItems: 'center' },
-  upNext: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '800', letterSpacing: 1.2, textTransform: 'uppercase', marginBottom: space.sm },
+  upNext: { color: BRAND.glow, fontSize: 14, fontWeight: '700', marginBottom: space.sm },
   ringBox: { width: 200, height: 200, alignItems: 'center', justifyContent: 'center', marginBottom: space.lg },
-  ring: { position: 'absolute', width: 150, height: 150, borderRadius: 75, borderWidth: 3, borderColor: '#FF8A5B' },
-  ringOuter: { borderColor: '#F44350', borderWidth: 2 },
+  ring: { position: 'absolute', width: 150, height: 150, borderRadius: 75, borderWidth: 3, borderColor: BRAND.flame },
+  ringOuter: { borderColor: BRAND.ember, borderWidth: 2 },
   ringCore: {
-    borderRadius: 64, borderWidth: 4, borderColor: '#FF8A5B', padding: 4, backgroundColor: 'rgba(255,255,255,0.08)',
-    elevation: 16, shadowColor: '#FF7556', shadowOpacity: 0.8, shadowRadius: 24, shadowOffset: { width: 0, height: 0 },
+    borderRadius: 64, borderWidth: 4, borderColor: BRAND.flame, padding: 4, backgroundColor: 'rgba(255,255,255,0.08)',
+    elevation: 16, shadowColor: BRAND.ember, shadowOpacity: 0.8, shadowRadius: 24, shadowOffset: { width: 0, height: 0 },
   },
   ringEnded: { borderColor: 'rgba(255,255,255,0.35)', elevation: 0 },
   name: { ...type.title, fontSize: 24, color: '#FFFFFF', textAlign: 'center' },
@@ -306,7 +306,7 @@ const useStyles = makeStyles(() => ({
   glassOn: { backgroundColor: '#FFFFFF' },
   glassText: { color: 'rgba(255,255,255,0.88)', fontSize: 12.5, fontWeight: '600' },
   endRow: { alignItems: 'center', marginTop: space.xl, gap: 8 },
-  endWrap: { borderRadius: 40, elevation: 14, shadowColor: '#F44350', shadowOpacity: 0.7, shadowRadius: 20, shadowOffset: { width: 0, height: 6 } },
+  endWrap: { borderRadius: 40, elevation: 14, shadowColor: BRAND.ember, shadowOpacity: 0.7, shadowRadius: 20, shadowOffset: { width: 0, height: 6 } },
   callWrap: { borderRadius: 40, elevation: 14, shadowColor: '#10B981', shadowOpacity: 0.7, shadowRadius: 20, shadowOffset: { width: 0, height: 6 } },
   end: { width: 76, height: 76, alignItems: 'center', justifyContent: 'center' },
   endText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
@@ -315,7 +315,7 @@ const useStyles = makeStyles(() => ({
   noteBox: { backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: radius.xl, padding: space.lg, gap: space.md },
   noteInput: { minHeight: 90, color: '#FFFFFF', fontSize: 15, textAlignVertical: 'top' },
   outcomes: { backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: radius.xl, padding: space.lg },
-  outTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '800', textAlign: 'center', marginBottom: space.md },
+  outTitle: { color: '#FFFFFF', fontSize: 17, fontWeight: '800', letterSpacing: -0.2, textAlign: 'center', marginBottom: space.md },
   outGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center' },
   outBtn: { width: '30%', alignItems: 'center', paddingVertical: 12, borderRadius: radius.lg, backgroundColor: 'rgba(255,255,255,0.12)', gap: 4 },
   outText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },

@@ -392,7 +392,8 @@ export const Pill = ({ label, fg, bg, icon, dot, pulse, dotColor }: {
 };
 
 /**
- * One tile of a stat row: a coloured icon tile, a big ExtraBold number and its label. An optional
+ * One pastel stat card, the same as Home's: the soft tint (`bg`) is the card, the icon sits in a
+ * white circle, then a big ExtraBold number and its label in the tint's ink (`fg`). An optional
  * action ("Upload now") sits where the caption would be.
  */
 export const MetricTile = ({ icon, label, value, fg, bg, sub, action, onAction, pulse, style }: {
@@ -410,13 +411,13 @@ export const MetricTile = ({ icon, label, value, fg, bg, sub, action, onAction, 
   const t = useTheme();
   const s = useStyles();
   return (
-    <View style={[s.metric, style]} accessible={!action} accessibilityLabel={`${label}: ${value}`}>
+    <View style={[s.metric, { backgroundColor: bg }, style]} accessible={!action} accessibilityLabel={`${label}: ${value}`}>
       <View style={s.metricTop}>
-        <View style={[s.metricIcon, { backgroundColor: bg }]}><Icon name={icon} size={18} color={fg} /></View>
+        <View style={s.metricIcon}><Icon name={icon} size={18} color={fg} /></View>
         {pulse && <PulseDot color={fg} />}
       </View>
       <Text style={[s.metricValue, value === '—' && s.metricDash]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
-      <Text style={s.metricLabel} numberOfLines={1}>{label}</Text>
+      <Text style={[s.metricLabel, { color: fg }]} numberOfLines={1}>{label}</Text>
       {action ? (
         <Pressable onPress={onAction} disabled={!onAction} hitSlop={10} accessibilityRole="button">
           <Text style={[s.metricSub, { color: t.c.link, fontWeight: '600' }]}>{action}</Text>
@@ -834,12 +835,12 @@ const useStyles = makeStyles((t) => ({
     backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginBottom: space.md, ...elevation(t),
   },
 
-  metric: { flex: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, padding: 14, ...elevation(t) },
+  metric: { flex: 1, borderRadius: radius.xl, padding: 14 },
   metricTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 },
-  metricIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  metricIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(255,255,255,0.75)', alignItems: 'center', justifyContent: 'center' },
   metricValue: { ...type.metric, color: t.c.text, marginTop: 10 },
   metricDash: { color: t.c.faint, fontWeight: '400' },
-  metricLabel: { flexShrink: 1, fontSize: 12.5, fontWeight: '600', color: t.c.muted, marginTop: 1 },
+  metricLabel: { flexShrink: 1, fontSize: 13, fontWeight: '700', marginTop: 1 },
   metricSub: { fontSize: 12, color: t.c.muted, marginTop: 2 },
 
   index: { minWidth: 34, height: 22, paddingHorizontal: 6, borderRadius: radius.sm, backgroundColor: t.c.surfaceAlt, alignItems: 'center', justifyContent: 'center' },

@@ -15,12 +15,9 @@ import type { ImportList } from '../ImportsScreen';
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '0', '⌫'];
 
 /** The four tints of a list's layer icon: pink, blue, amber, purple. */
-export const LIST_TONES = (t: Theme) => [
-  { fg: '#DB2777', bg: t.dark ? '#3A1530' : '#FCE7F3', bar: '#EC4899' },
-  { fg: t.c.blue, bg: t.c.blueSoft, bar: '#3B82F6' },
-  { fg: t.c.warning, bg: t.c.warningSoft, bar: '#F59E0B' },
-  { fg: t.c.violet, bg: t.c.violetSoft, bar: '#8B5CF6' },
-];
+/** A calling list's colour, by its position: the same tints as Home's lists carousel. */
+export const LIST_TONES = (t: Theme) => [t.tints.sky, t.tints.peach, t.tints.berry, t.tints.mint]
+  .map((x) => ({ fg: x.fg, bg: x.bg, bar: x.fg }));
 
 export default function QuickCallSheet({ visible, onClose, lists, onDial, onPowerDial }: {
   visible: boolean;
