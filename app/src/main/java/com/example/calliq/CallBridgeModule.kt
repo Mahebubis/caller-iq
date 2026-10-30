@@ -833,11 +833,12 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
                 val color = android.graphics.Color.parseColor(colorHex)
                 val window = activity.window
                 window.decorView.setBackgroundColor(color)
+                // Deprecated on Android 15, but OEM builds with 3-button navigation still paint the
+                // bar from it — left alone, it kept the launch window's night colour under the app.
                 @Suppress("DEPRECATION")
-                if (Build.VERSION.SDK_INT < 35) {
-                    window.statusBarColor = color
-                    window.navigationBarColor = color
-                }
+                window.statusBarColor = color
+                @Suppress("DEPRECATION")
+                window.navigationBarColor = color
                 androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
                     isAppearanceLightStatusBars = !dark
                     isAppearanceLightNavigationBars = !dark

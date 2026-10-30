@@ -3,24 +3,32 @@ import { processColor, requireNativeComponent, StyleProp, StyleSheet, Text, View
 import { makeStyles, useTheme } from './theme';
 
 /*
- * The Sunset Coral artwork, on top of the two native views in CiqArtViews.kt:
- *   <Gradient>  a gradient surface (buttons, chips, hero, call screen) with optional leaf sprays
- *   <Leaves>    just the translucent botanical leaves, for the corners of a plain screen or sheet
- *   <Donut>     a ring chart
- *   <Avatar>    round initials in one of the five avatar tints
- *   <Logo>      "Call" in charcoal + "IQ" in coral
+ * The app's artwork:
+ *   <Gradient>  a filled surface. The design is flat now, so it paints its first colour stop;
+ *               the angle and leaf props are accepted and ignored so callers need no change.
+ *   <Leaves>    draws nothing (the leaf sprays were retired with the flat design).
+ *   <Donut>     a ring chart, drawn natively by CiqArtViews.kt
+ *   <Avatar>    round initials in one of the person tints
+ *   <Mark>      the CallIQ mark ("Signal C"), drawn natively by CiqMark.kt; `play` draws it in
+ *   <Logo>      the lockup: the mark, then "Call" in ink + "IQ" in ember
  */
 
-const NativeArt = requireNativeComponent<any>('CiqArt');
 const NativeDonut = requireNativeComponent<any>('CiqDonut');
+const NativeMark = requireNativeComponent<any>('CiqMark');
+
+/** The brand colours of the mark, for the intro and anything drawn around the logo. */
+export const BRAND = { night: '#0F0A08', ember: '#FF5A4E', flame: '#FF8A5B', glow: '#FFC27A', emberInk: '#E8443A' };
+
+export const Mark = ({ size, tone = 'dark', play = false, style }: { size: number; tone?: 'dark' | 'light'; play?: boolean; style?: StyleProp<ViewStyle> }) => (
+  <NativeMark tone={tone} play={play} style={[{ width: size, height: size }, style]} />
+);
 
 const colorsOf = (cs: string[]) => cs.map((c) => processColor(c) as number);
 
 type LeafSpot = 'none' | 'corners' | 'bottom' | 'top' | 'bottom-right';
 
-export const Gradient = ({ colors, angle = 90, corner = 0, leaves = 'none', leafColor, style, children, pointerEvents }: {
+export const Gradient = ({ colors, corner = 0, style, children, pointerEvents }: {
   colors: string[];
-  /** CSS angle: 90 = left → right, 180 = top → bottom, 145 = the hero's diagonal. */
   angle?: number;
   corner?: number;
   leaves?: LeafSpot;
@@ -29,33 +37,12 @@ export const Gradient = ({ colors, angle = 90, corner = 0, leaves = 'none', leaf
   children?: React.ReactNode;
   pointerEvents?: 'box-none' | 'none' | 'auto';
 }) => (
-  <View style={[{ borderRadius: corner }, style]} pointerEvents={pointerEvents}>
-    <NativeArt
-      style={[StyleSheet.absoluteFill, { borderRadius: corner }]}
-      colors={colorsOf(colors)}
-      angle={angle}
-      corner={corner}
-      leaves={leaves}
-      leafColor={leafColor ? processColor(leafColor) : undefined}
-      pointerEvents="none"
-    />
+  <View style={[{ borderRadius: corner, backgroundColor: colors[0] }, style]} pointerEvents={pointerEvents}>
     {children}
   </View>
 );
 
-/** Leaves alone, filling the parent (put it first, behind the content). */
-export const Leaves = ({ spot = 'bottom', color }: { spot?: LeafSpot; color?: string }) => {
-  const t = useTheme();
-  return (
-    <NativeArt
-      style={StyleSheet.absoluteFill}
-      colors={colorsOf(['#00000000', '#00000000'])}
-      leaves={spot}
-      leafColor={processColor(color || (t.dark ? 'rgba(255,138,143,0.07)' : 'rgba(244,67,80,0.07)'))}
-      pointerEvents="none"
-    />
-  );
-};
+export const Leaves = (_: { spot?: LeafSpot; color?: string }) => null;
 
 export const Donut = ({ values, colors, size = 140, thickness = 18, track, children }: {
   values: number[];
@@ -103,16 +90,21 @@ export const Avatar = memo(({ name, phone, size = 40 }: { name?: string; phone?:
 export const Logo = ({ size = 20, light }: { size?: number; light?: boolean }) => {
   const t = useTheme();
   const s = useStyles();
+  const onDark = light || t.dark;
   return (
-    <Text style={[s.logo, { fontSize: size }]} accessibilityRole="header" numberOfLines={1}>
-      <Text style={{ color: light ? '#FFFFFF' : t.dark ? '#F8EEF1' : '#1E1B26' }}>Call</Text>
-      <Text style={{ color: light ? '#FF9A8F' : '#F44350' }}>IQ</Text>
-    </Text>
+    <View style={s.lockup} accessible accessibilityRole="header" accessibilityLabel="CallIQ">
+      <Mark size={Math.round(size * 1.45)} tone={onDark ? 'dark' : 'light'} />
+      <Text style={[s.logo, { fontSize: size }]} numberOfLines={1}>
+        <Text style={{ color: light ? '#FFFFFF' : t.c.text }}>Call</Text>
+        <Text style={{ color: onDark ? BRAND.ember : BRAND.emberInk }}>IQ</Text>
+      </Text>
+    </View>
   );
 };
 
 const useStyles = makeStyles(() => ({
   avatar: { alignItems: 'center', justifyContent: 'center' },
-  avatarText: { fontWeight: '800', letterSpacing: 0.2 },
-  logo: { fontWeight: '800', letterSpacing: -0.5 },
+  avatarText: { fontWeight: '600', letterSpacing: 0.2 },
+  lockup: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  logo: { fontWeight: '800', letterSpacing: -0.6 },
 }));

@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- The app opens on the brand intro's night colour, so launch → intro has no white flash. The
+         screen takes its own colours from the theme once the intro hands over (setSystemBarsTheme). -->
     <style name="Theme.Calliq" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <!-- Behind the status and navigation bars, matching the header and tab bar (white, or dark at night). -->
-        <item name="android:statusBarColor">@color/ciq_surface</item>
-        <item name="android:navigationBarColor">@color/ciq_surface</item>
-        <item name="android:windowBackground">@color/ciq_surface</item>
+        <item name="android:statusBarColor">@color/ciq_splash</item>
+        <item name="android:navigationBarColor">@color/ciq_splash</item>
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 
     <!--

@@ -11,6 +11,6 @@ class CallBridgePackage : ReactPackage {
     }
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
-        return listOf(CiqArtManager(), CiqDonutManager())
+        return listOf(CiqArtManager(), CiqDonutManager(), CiqMarkManager(), CiqGlowManager())
     }
 }

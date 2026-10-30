@@ -5,7 +5,7 @@ import { dateTime } from '../format';
 import { Button, Icon } from '../ui';
 import { BuildInfo } from '../types';
 
-/** "This is the latest build" — whatever was in BUILD_NOTE.txt when this APK was built. */
+/** About CallIQ (Settings → About): whatever was in BUILD_NOTE.txt when this APK was built, the version and the install time. */
 export default function BuildNoteDialog({ info, visible, onClose }: { info: BuildInfo | null; visible: boolean; onClose: () => void }) {
   const t = useTheme();
   const s = useStyles();
@@ -15,7 +15,7 @@ export default function BuildNoteDialog({ info, visible, onClose }: { info: Buil
         <Pressable style={s.card} onPress={() => {}} accessible={false}>
           <View style={s.badge}>
             <Icon name="verified" size={16} color={t.c.link} />
-            <Text style={s.badgeText}>Latest build installed</Text>
+            <Text style={s.badgeText}>What's new in CallIQ</Text>
           </View>
           <Text style={s.note}>{info?.note}</Text>
           <View style={s.metaRow}>

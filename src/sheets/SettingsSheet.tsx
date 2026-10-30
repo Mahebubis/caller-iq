@@ -26,6 +26,8 @@ interface Props {
   /** Accent colour and font size, next to the theme. */
   appearance?: Appearance;
   appVersion: string;
+  /** Opens the build note (version, what's new, install time). */
+  onAbout?: () => void;
 
   unlocked: boolean;
   onUnlock: (pin: string) => boolean;
@@ -86,7 +88,7 @@ export default function SettingsSheet(p: Props) {
   });
 
   return (
-    <Sheet visible={p.visible} onClose={p.onClose} title="Settings" subtitle={`Caller IQ ${p.appVersion ? `v${p.appVersion}` : ''}`}>
+    <Sheet visible={p.visible} onClose={p.onClose} title="Settings" subtitle={`CallIQ ${p.appVersion ? `v${p.appVersion}` : ''}`}>
       <Text style={s.section}>Appearance</Text>
       <Text style={s.label}>Theme</Text>
       <Segmented options={THEMES} value={p.themePref} onChange={p.onThemePref} />
@@ -110,6 +112,20 @@ export default function SettingsSheet(p: Props) {
             options={[{ key: 'small', label: 'Small' }, { key: 'medium', label: 'Medium' }, { key: 'large', label: 'Large' }] as const}
             value={p.appearance.fontSize}
             onChange={(f: FontSize) => p.appearance!.onFontSize(f)}
+          />
+        </>
+      )}
+
+      {/* Version, build note and install time live here, not on the startup screen. */}
+      {!!p.onAbout && (
+        <>
+          <Text style={s.section}>About</Text>
+          <SettingRow
+            icon="info"
+            title="About CallIQ"
+            desc={`Version ${p.appVersion || '—'} · what's new in this build`}
+            onPress={p.onAbout}
+            right={<Icon name="chevron_right" size={22} color={t.c.faint} />}
           />
         </>
       )}

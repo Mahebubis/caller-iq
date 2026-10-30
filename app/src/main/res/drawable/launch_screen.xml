@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The launch window: the CallIQ mark on night, from the very first frame. 288dp is the size the
+    brand intro draws the mark at (the arcs span 41.6 of the icon's 108 units, so 111dp, the same
+    as CiqMarkView at 173dp), centred on the screen as the intro centres it — so when the intro
+    takes over, nothing moves.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/ciq_splash" />
+    <item
+        android:width="288dp"
+        android:height="288dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_launcher_foreground" />
+</layer-list>

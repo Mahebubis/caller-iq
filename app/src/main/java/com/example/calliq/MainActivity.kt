@@ -1,6 +1,5 @@
 package com.example.calliq
 
-import android.content.res.Configuration
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
@@ -33,12 +32,11 @@ class MainActivity : ReactActivity() {
      */
     private fun fitBetweenSystemBars() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        // Until the app's own theme loads (it then calls CallBridge.setSystemBarsTheme), follow the
-        // phone: dark icons on the light header, light icons on the dark one.
-        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        // The app opens on the brand intro's night colour, so the bars start with light icons; the
+        // intro hands them to the app's own theme when it ends (CallBridge.setSystemBarsTheme).
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = !night
-            isAppearanceLightNavigationBars = !night
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
         }
         val content = findViewById<View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(content) { v, insets ->

@@ -3,4 +3,7 @@
     <!-- The app's surface colour (header, tab bar), shown behind the system bars before the
          React Native screen takes over. Matches src/theme.ts; values-night has the dark one. -->
     <color name="ciq_surface">#FFFFFF</color>
+    <!-- The brand intro's night: the launch window, the system splash and the intro share it, so
+         opening CallIQ goes from the icon to the mark without a white flash. -->
+    <color name="ciq_splash">#0F0A08</color>
 </resources>
