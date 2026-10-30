@@ -1,0 +1,2 @@
+# Hermes bytecode (npm run bundle:android): never convert line endings.
+app/src/main/assets/index.android.bundle binary
