@@ -40,8 +40,6 @@ export const usePoints = () => {
 };
 export const useUndo = () => useContext(UndoCtx);
 
-const isMissed = (tp: string) => tp === 'MISSED' || tp === 'REJECTED';
-
 export function EngageProvider({ calls, ready, children }: { calls: CallLogItem[]; ready: boolean; children: React.ReactNode }) {
   const toast = useToast();
   const [stats, setStats] = useState<Stats | null>(null);

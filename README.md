@@ -29,8 +29,11 @@ Before setting up the project, ensure the new laptop has the following installed
 
 ## 🚀 Step-by-Step Setup Instructions
 
-### 1. Extract the Source Code
-Extract the `CallIQ_Project_Source.zip` file to your preferred workspace (e.g., `C:\Users\YourName\AndroidStudioProjects\calliq`).
+### 1. Get the Source Code
+Clone the repository into your preferred workspace (e.g., `C:\Users\YourName\AndroidStudioProjects\calliq2`):
+```bash
+git clone https://github.com/Mahebubis/caller-iq.git calliq2
+```
 
 ### 2. Install NPM Dependencies
 Open a Terminal (or Command Prompt) inside the extracted project folder and run:
@@ -58,7 +61,7 @@ npm run android
 
 **Option B: Using Android Studio (Recommended for Native Debugging)**
 1. Open Android Studio.
-2. Click **File > Open** and select the `android` folder inside the project (`calliq/android`).
+2. Click **File > Open** and select the project folder itself (it holds `settings.gradle.kts`; there is no separate `android` folder).
 3. Allow Android Studio a few minutes to download Gradle and index the Kotlin files.
 4. Click the green **Play (Run)** button in the top toolbar to install the app on your device/emulator.
 

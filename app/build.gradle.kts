@@ -55,7 +55,6 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.google.android.material:material:1.11.0")
 
     // WorkManager for reliable background call log syncing
     implementation(libs.androidx.work.runtime.ktx)

@@ -1387,8 +1387,6 @@ const useStyles = makeStyles((t) => ({
     flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: space.lg, paddingVertical: 10,
     backgroundColor: t.c.surface, borderBottomLeftRadius: 22, borderBottomRightRadius: 22, ...elevation(t), zIndex: 2,
   },
-  logo: { width: 40, height: 40, borderRadius: radius.md, backgroundColor: t.c.primary, alignItems: 'center', justifyContent: 'center' },
-  brand: { fontSize: 17, fontWeight: '700', color: t.c.text, letterSpacing: -0.2 },
   brandSub: { fontSize: 11.5, color: t.c.muted, marginTop: 1 },
   syncPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, minHeight: 30, borderRadius: radius.pill },
   syncText: { fontSize: 12, fontWeight: '600' },

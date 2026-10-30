@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Text, View } from 'react-native';
-import { makeStyles, radius, space, useTheme } from '../theme';
+import { makeStyles, radius, space } from '../theme';
 import { prettyPhone } from '../format';
 import { Banner, Button, Chip, ChipBar, Field, Sheet } from '../ui';
 import { useWhatsApp, WaContact, fillWa } from '../whatsapp';
@@ -17,7 +17,6 @@ export default function WaSendSheet({ contact, onClose, onManage }: {
   /** Opens the templates manager (the campaign sheet's). */
   onManage: () => void;
 }) {
-  const t = useTheme();
   const s = useStyles();
   const wa = useWhatsApp();
   const [pickedId, setPickedId] = useState<string>('');

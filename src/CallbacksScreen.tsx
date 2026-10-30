@@ -2,12 +2,12 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import { ActivityIndicator, Alert, AppState, FlatList, NativeModules, Pressable, RefreshControl, Text, View } from 'react-native';
 import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
 import { errorKind, panelAsk, panelDevice } from './api';
-import { ago, callbackTime, dueIn, last10, num, plural, prettyPhone, serverTime } from './format';
+import { ago, callbackTime, dueIn, last10, plural, prettyPhone, serverTime } from './format';
 import {
-  AttemptBadge, Banner, Button, Chip, ChipBar, EmptyState, Icon, IconButton, IconName, IndexBadge, Pill, SearchField, Segmented, SectionHeader,
+  Banner, Button, Chip, ChipBar, EmptyState, IconButton, Pill, SearchField, Segmented,
   SkeletonCard,
 } from './ui';
-import { MAX_ATTEMPTS, ScheduleTarget, SmsTarget } from './types';
+import { ScheduleTarget, SmsTarget } from './types';
 import type { ImportList, Show } from './ImportsScreen';
 import { useWaSend } from './whatsapp';
 import type { FocusTarget } from './sheets/FocusSheet';
@@ -142,15 +142,11 @@ export const pendingCallbacks = (calls: CallbackCall[]): Owed[] => {
   return out.sort((a, b) => b.lastAt - a.lastAt);
 };
 
-const REASON_ICON: { [k in Reason]: IconName } = {
-  missed: 'phone_missed', callback: 'event', no_answer: 'phone_disabled', imported: 'format_list_bulleted', scheduled: 'alarm',
-};
 const REASON_LABEL: { [k in Reason]: string } = {
   missed: 'Missed call', callback: 'Callback scheduled', no_answer: 'Not answering', imported: 'From a list', scheduled: 'Scheduled',
 };
-const IMPORTED_LABEL: { [k: string]: string } = { needs_callback: 'Needs callback', missed_call: 'Missed call', pending_followup: 'Follow-up' };
 
-const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenList, onCount, onItems, onSchedule, onSms, onFocus, reloadSignal }: Props) => {
+const CallbacksScreen = ({ active, syncEndpoint, calls, onDial, onCount, onItems, onSchedule, onSms, onFocus, reloadSignal }: Props) => {
   const t = useTheme();
   const s = useStyles();
   const [scope, setScope] = useState<'team' | 'phone'>('team');
@@ -315,10 +311,6 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
     });
   }, []);
 
-  const fromLists = useMemo(() => lists
-    .map((l) => ({ l, n: Math.max(0, (l.reached || 0) - (l.connected || 0)) }))
-    .filter((x) => x.n > 0), [lists]);
-
   const onPull = async () => {
     setPulling(true);
     try { await loadTeam('retry'); } finally { setPulling(false); }
@@ -380,30 +372,6 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, lists, onDial, onOpenLis
       onAction={() => setQuery('')}
     />
   );
-
-  const footer = fromLists.length > 0 ? (
-    <View style={{ marginTop: space.lg }}>
-      <SectionHeader title="From calling lists" />
-      <Text style={[s.sub, { marginTop: -4, marginBottom: space.md }]}>Called, but nobody picked up yet</Text>
-      {fromLists.map(({ l, n }) => (
-        <Pressable
-          key={l.id}
-          onPress={() => onOpenList(l.id, 'not_connected')}
-          accessibilityRole="button"
-          accessibilityLabel={`${l.name}: ${n} not connected. Open list`}
-          android_ripple={{ color: t.c.ripple }}
-          style={({ pressed }) => [s.card, s.row, pressed && { opacity: 0.9 }]}
-        >
-          <View style={[s.reasonIcon, { backgroundColor: t.c.orangeSoft }]}><Icon name="format_list_bulleted" size={20} color={t.c.orange} /></View>
-          <View style={{ flex: 1 }}>
-            <Text style={s.listName} numberOfLines={1}>{l.name}</Text>
-            <Text style={s.meta}>{num(n)} not connected · {num(l.connected)} connected</Text>
-          </View>
-          <Icon name="chevron_right" size={22} color={t.c.faint} />
-        </Pressable>
-      ))}
-    </View>
-  ) : null;
 
   return (
     <FlatList
@@ -488,14 +456,8 @@ const useStyles = makeStyles((t) => ({
     backgroundColor: t.c.surface, borderRadius: radius.xl, padding: 14, marginBottom: 10, ...elevation(t),
   },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  reasonIcon: { width: 40, height: 40, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
-  numberRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  number: { fontSize: 15.5, fontWeight: '600', color: t.c.text, letterSpacing: 0.2 },
   name: { fontSize: 15.5, color: t.c.text, fontWeight: '700' },
-  listName: { fontSize: 15, fontWeight: '600', color: t.c.text },
   meta: { fontSize: 12, color: t.c.muted, marginTop: 3 },
-  agentRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 8, marginLeft: 52 },
-  agent: { fontSize: 12, color: t.c.muted },
   note: { fontSize: 13, color: t.c.textSoft, fontStyle: 'italic', marginTop: 8, marginLeft: 56 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12, marginLeft: 56 },
 }));

@@ -2,7 +2,7 @@ import React, { memo, useMemo } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
 import { num } from './format';
-import { Icon, IconButton, IconName, Tactile } from './ui';
+import { Icon, IconName, Tactile } from './ui';
 import { Avatar, Gradient, Logo } from './art';
 import { usePoints } from './engage';
 import { RANK_ICON } from './crm';

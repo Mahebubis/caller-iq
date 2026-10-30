@@ -344,7 +344,6 @@ const ReportLine = ({ icon, color, text }: { icon: any; color: string; text: str
 
 const useStyles = makeStyles((t) => ({
   footer: { flexDirection: 'row', gap: 10, marginTop: space.lg },
-  empty: { alignItems: 'center', gap: 14, paddingVertical: space.xl },
   dropzone: {
     alignItems: 'center', gap: 12, paddingVertical: space.xxl, paddingHorizontal: space.lg, marginTop: space.md,
     borderWidth: 2, borderStyle: 'dashed', borderColor: '#F48FB1', borderRadius: 22, backgroundColor: t.c.surfaceAlt,

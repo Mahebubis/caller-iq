@@ -8,7 +8,7 @@ import { ago, callbackTime, dateOnly, dueIn, num, plural, prettyPhone, serverTim
 import { MAX_ATTEMPTS, ScheduleTarget, SmsTarget } from './types';
 import { useWaSend, WaContact } from './whatsapp';
 import { Agent, crm, csvRow, EMPTY_META, hourWindow, Meta, native, Stage, STAGES, waited } from './crm';
-import { DRIP, DRIP_STEPS, fillSales, OFFER, TEMPLATES } from './sales';
+import { DRIP, DRIP_STEPS, OFFER } from './sales';
 import { loadLinks, saveLinks, SheetLink, SYNC_EVERY_MS, syncLink } from './sheetSync';
 import { usePoints, useUndo } from './engage';
 import ImportSheet from './sheets/ImportSheet';
@@ -1387,7 +1387,6 @@ const ImportsScreen = forwardRef<ImportsHandle, Props>(({ active, syncEndpoint, 
       [{ text: 'Cancel', style: 'cancel' }, {
         text: 'Start', onPress: async () => {
           try {
-            const seg = segmentName();
             const steps = DRIP.en.map((m, i) => ({ afterMin: DRIP_STEPS[i].afterMin, message: m.replace(/\{segment\}/g, OFFER).replace(/\{me\}/g, live.current.myName || 'our team') }));   // {name} is filled per person by the bridge
             const r = await wa.startDrip(list, steps);
             if (!r) { toast('Set up the WhatsApp bridge to run drips', 'error'); return; }
@@ -2255,7 +2254,6 @@ const useStyles = makeStyles((t) => ({
   listActions: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: space.md },
 
   detailHead: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: space.lg },
-  summary: { flexDirection: 'row', gap: 6, marginBottom: space.md },
   sumPill: {
     flexBasis: '31%', flexGrow: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: 'transparent', ...elevation(t),
     paddingHorizontal: 9, paddingVertical: 9,

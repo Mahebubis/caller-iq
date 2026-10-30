@@ -372,28 +372,6 @@ export const IconButton = ({
 
 /* ── Surfaces ── */
 
-export const Card = ({ children, style, onPress, accessibilityLabel }: {
-  children: React.ReactNode;
-  style?: StyleProp<ViewStyle>;
-  onPress?: () => void;
-  accessibilityLabel?: string;
-}) => {
-  const t = useTheme();
-  const s = useStyles();
-  if (!onPress) return <View style={[s.card, style]}>{children}</View>;
-  return (
-    <Tactile
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel}
-      android_ripple={{ color: t.c.ripple }}
-      style={[s.card, style]}
-    >
-      {children}
-    </Tactile>
-  );
-};
-
 /** A capsule status badge. `pulse` makes its dot breathe, for something happening right now. */
 export const Pill = ({ label, fg, bg, icon, dot, pulse, dotColor }: {
   label: string;

@@ -3,9 +3,9 @@ import { FlatList, NativeModules, Pressable, RefreshControl, Text, View } from '
 import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
 import { Avatar } from './art';
 import { HomeTop } from './HomeDash';
-import { ago, callbackTime, callTime, clock, dueIn, last10, num, plural, prettyPhone, talk } from './format';
+import { ago, callbackTime, callTime, clock, dueIn, last10, num, plural, prettyPhone } from './format';
 import {
-  Appear, AttemptBadge, Banner, Button, EmptyState, Icon, IconButton, IconName, IndexBadge, MetricTile, Pill, ProgressBar, PulseDot,
+  Appear, AttemptBadge, Banner, Button, EmptyState, Icon, IconButton, IconName, IndexBadge, Pill, ProgressBar, PulseDot,
   SearchField, Segmented, SectionHeader, Tactile,
 } from './ui';
 import { CallLogItem, MAX_ATTEMPTS, ScheduleTarget, SetupInfo, SIM_SOURCE_TEXT, SimNicknameMap, SmsTarget } from './types';
@@ -129,7 +129,7 @@ const FEED_KIND: { [k in FeedKind]: { label: string; icon: IconName; tone: 'succ
   scheduled: { label: 'Callback', icon: 'alarm', tone: 'blue' },
 };
 
-const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onSms, onFocus }: {
+const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onFocus }: {
   calls: CallLogItem[];
   tasks: Owed[];
   onDial: (n: string) => void;
@@ -273,15 +273,6 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
       return false;
     },
   }));
-
-  /* Today */
-  const today = useMemo(() => {
-    const start = new Date().setHours(0, 0, 0, 0);
-    const list = p.calls.filter((c) => c && c.timestamp >= start);
-    const talkSec = list.reduce((a, c) => a + (c.duration || 0), 0);
-    const connected = list.filter((c) => c.duration > 0 || !isMissed(c.callType)).length;
-    return { count: list.length, talkSec, rate: list.length ? Math.round((connected / list.length) * 100) : null };
-  }, [p.calls]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -513,11 +504,6 @@ const useStyles = makeStyles((t) => ({
   },
   link: { fontSize: 13, fontWeight: '600', color: t.c.link },
 
-  todayHead: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: space.md, marginTop: space.xs },
-  todayTitle: { ...type.title, color: t.c.text },
-  todayDate: { fontSize: 12, color: t.c.muted },
-  bentoRow: { flexDirection: 'row', gap: space.sm, marginBottom: space.sm },
-
   listsEmpty: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listsEmptyText: { flex: 1, fontSize: 12.5, color: t.c.muted, lineHeight: 18 },
   listRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
@@ -529,7 +515,6 @@ const useStyles = makeStyles((t) => ({
   feedHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
   feedTitle: { ...type.heading, color: t.c.text },
   feedRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10 },
-  feedIcon: { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   feedName: { fontSize: 14.5, fontWeight: '600', color: t.c.text },
   feedTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
 
@@ -561,7 +546,6 @@ const useStyles = makeStyles((t) => ({
     borderWidth: 2, borderColor: t.c.surface,
   },
   callTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  typeIcon: { width: 40, height: 40, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
   callTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   callNumber: { flex: 1, fontSize: 15.5, fontWeight: '600', color: t.c.text, letterSpacing: 0.2 },
   callTime: { fontSize: 11.5, color: t.c.faint },

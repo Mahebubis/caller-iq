@@ -250,7 +250,6 @@ export const getTheme = (isDark: boolean, accent: AccentKey = 'sunset', size: Fo
   return t;
 };
 export const lightTheme = getTheme(false);
-export const darkTheme = getTheme(true);
 
 export type ThemePref = 'system' | 'light' | 'dark';
 
