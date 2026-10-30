@@ -2,7 +2,6 @@ import React, { createContext, memo, useCallback, useContext, useEffect, useRef,
 import {
   ActivityIndicator,
   Animated,
-  Dimensions,
   Easing,
   GestureResponderEvent,
   Modal,
@@ -10,7 +9,6 @@ import {
   PressableProps,
   ScrollView,
   StyleProp,
-  StyleSheet,
   Text,
   TextInput,
   TextStyle,
@@ -18,7 +16,6 @@ import {
   ViewStyle,
 } from 'react-native';
 import { elevation, glow, makeStyles, radius, space, type, useTheme } from './theme';
-import { Gradient, Leaves } from './art';
 
 /*
  * The building blocks every screen is made of, so a button, a card or a search box looks and
@@ -34,6 +31,7 @@ const GLYPHS = {
   add: 0xe145,
   alarm: 0xe855,
   arrow_back: 0xe5c4,
+  arrow_forward: 0xe5c8,
   autorenew: 0xe863,
   block: 0xe14b,
   bolt: 0xea0b,
@@ -68,6 +66,7 @@ const GLYPHS = {
   history: 0xe889,
   inbox: 0xe156,
   info_outline: 0xe88f,
+  info: 0xe88e,
   insights: 0xf092,
   link_off: 0xe16f,
   light_mode: 0xe518,
@@ -119,6 +118,7 @@ const GLYPHS = {
   emoji_events: 0xea23,
   leaderboard: 0xf20c,
   local_fire_department: 0xef55,
+  military_tech: 0xea3f,
   merge_type: 0xe252,
   mic: 0xe029,
   more_vert: 0xe5d4,
@@ -184,12 +184,13 @@ export const useGuardedPress = (onPress?: () => any) => {
 };
 
 /* ── Tactile press ───────────────────────────────────────────────────────────
- * Everything tappable squishes while held and springs back with a little overshoot when let go —
- * the same feel on every card, row, chip and button. Runs on the native driver; a short press
- * delay keeps a list from squishing the card under the finger when it is only being scrolled. */
+ * Everything tappable gives a little under the finger and settles back when let go — the same
+ * feel on every card, row, chip and button, quick and without overshoot. Runs on the native
+ * driver; a short press delay keeps a list from pressing the card under the finger when it is
+ * only being scrolled. */
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
-export const Tactile = ({ style, scaleTo = 0.96, onPressIn, onPressOut, children, ...rest }: Omit<PressableProps, 'style' | 'children'> & {
+export const Tactile = ({ style, scaleTo = 0.97, onPressIn, onPressOut, children, ...rest }: Omit<PressableProps, 'style' | 'children'> & {
   style?: StyleProp<ViewStyle> | ((pressed: boolean) => StyleProp<ViewStyle>);
   scaleTo?: number;
   children: React.ReactNode;
@@ -207,7 +208,7 @@ export const Tactile = ({ style, scaleTo = 0.96, onPressIn, onPressOut, children
       }}
       onPressOut={(e: GestureResponderEvent) => {
         setPressed(false);
-        Animated.spring(scale, { toValue: 1, speed: 14, bounciness: 12, useNativeDriver: true }).start();
+        Animated.spring(scale, { toValue: 1, speed: 30, bounciness: 0, useNativeDriver: true }).start();
         onPressOut?.(e);
       }}
       style={[typeof style === 'function' ? style(pressed) : style, { transform: [{ scale }] }]}
@@ -258,20 +259,24 @@ export const Appear = ({ index = 0, children, style }: { index?: number; childre
   );
 };
 
-/* ── Buttons ── */
+/* ── Buttons ──
+ * Flat and fully round, decided once. Primary: the accent's ink with a white label, one per
+ * screen. Secondary: white with a 1px control edge. Soft: the accent's pale tint. Ghost: text. */
 
-const BTN_RADIUS = 14;
+const BTN_RADIUS = 999;
 
 type Variant = 'primary' | 'success' | 'secondary' | 'soft' | 'ghost' | 'danger';
 
 export const Button = ({
-  label, onPress, variant = 'primary', size = 'md', icon, loading, disabled, pill, style, accessibilityLabel,
+  label, onPress, variant = 'primary', size = 'md', icon, iconColor, loading, disabled, pill, style, accessibilityLabel,
 }: {
   label: string;
   onPress?: () => any;
   variant?: Variant;
   size?: 'sm' | 'md' | 'lg';
   icon?: IconName;
+  /** The icon's own colour, e.g. a green phone on a quiet secondary "Call" in a list row. */
+  iconColor?: string;
   loading?: boolean;
   disabled?: boolean;
   /** Fully rounded ends, for the one main action of an empty or error state. */
@@ -286,7 +291,7 @@ export const Button = ({
   const fg = variant === 'primary' ? t.c.onPrimary
     : variant === 'danger' || variant === 'success' ? '#FFFFFF'
     : variant === 'soft' || variant === 'ghost' ? t.c.link
-    : t.c.textSoft;
+    : t.c.text;
   const off = disabled || loading;
   return (
     <Tactile
@@ -302,27 +307,21 @@ export const Button = ({
         s.btn,
         size === 'sm' ? s.btnSm : size === 'lg' ? s.btnLg : s.btnMd,
         pill && { borderRadius: radius.pill },
+        filled && { backgroundColor: variant === 'success' ? t.c.success : variant === 'danger' ? t.c.danger : t.c.primary },
         variant === 'primary' && !off && glow(t),
         variant === 'secondary' && s.btnSecondary,
         variant === 'soft' && { backgroundColor: t.c.primarySoft },
-        pressed && filled && { opacity: 0.92 },
+        pressed && filled && { opacity: 0.88 },
+        pressed && !filled && { backgroundColor: variant === 'soft' ? t.c.primaryLine : t.c.surfaceAlt },
         off && { opacity: 0.5 },
         style,
       ]}
     >
-      {filled && (
-        <Gradient
-          colors={variant === 'success' ? t.grad.tiles.start : variant === 'danger' ? ['#FB7185', '#F43F5E', '#E11D48'] : t.grad.primary}
-          corner={pill ? 999 : BTN_RADIUS}
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
-      )}
       {loading ? (
         <ActivityIndicator size="small" color={fg} />
       ) : (
         <>
-          {icon && <Icon name={icon} size={size === 'sm' ? 16 : 18} color={fg} />}
+          {icon && <Icon name={icon} size={size === 'sm' ? 16 : 18} color={iconColor || fg} />}
           <Text style={[s.btnText, size === 'sm' && s.btnTextSm, filled && s.btnTextFilled, { color: fg }]} numberOfLines={1}>{label}</Text>
         </>
       )}
@@ -357,7 +356,7 @@ export const IconButton = ({
       android_ripple={{ color: t.c.ripple, borderless: true, radius: size / 2 + 4 }}
       style={[
         { width: size, height: size, borderRadius: size / 2, alignItems: 'center', justifyContent: 'center' },
-        tone === 'outlined' && { borderWidth: 1, borderColor: t.c.border, backgroundColor: t.c.surface },
+        tone === 'outlined' && { borderWidth: 1, borderColor: t.c.borderStrong, backgroundColor: t.c.surface },
         tone === 'soft' && { backgroundColor: t.c.primarySoft },
         disabled && { opacity: 0.4 },
       ]}
@@ -393,8 +392,8 @@ export const Pill = ({ label, fg, bg, icon, dot, pulse, dotColor }: {
 };
 
 /**
- * One tile of a bento metric strip: a tinted icon badge, a big tabular number and its label.
- * An optional action ("Upload now") sits where the caption would be.
+ * One tile of a stat row: a coloured icon tile, a big ExtraBold number and its label. An optional
+ * action ("Upload now") sits where the caption would be.
  */
 export const MetricTile = ({ icon, label, value, fg, bg, sub, action, onAction, pulse, style }: {
   icon: IconName;
@@ -416,11 +415,11 @@ export const MetricTile = ({ icon, label, value, fg, bg, sub, action, onAction, 
         <View style={[s.metricIcon, { backgroundColor: bg }]}><Icon name={icon} size={18} color={fg} /></View>
         {pulse && <PulseDot color={fg} />}
       </View>
-      <Text style={[s.metricValue, value === '—' && { color: t.c.faint }]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
+      <Text style={[s.metricValue, value === '—' && s.metricDash]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
       <Text style={s.metricLabel} numberOfLines={1}>{label}</Text>
       {action ? (
         <Pressable onPress={onAction} disabled={!onAction} hitSlop={10} accessibilityRole="button">
-          <Text style={[s.metricSub, { color: t.c.link, fontWeight: '700' }]}>{action}</Text>
+          <Text style={[s.metricSub, { color: t.c.link, fontWeight: '600' }]}>{action}</Text>
         </Pressable>
       ) : (
         !!sub && <Text style={s.metricSub} numberOfLines={1}>{sub}</Text>
@@ -429,7 +428,7 @@ export const MetricTile = ({ icon, label, value, fg, bg, sub, action, onAction, 
   );
 };
 
-/** "Attempts 1/3" — how many times we have rung this contact back; solid red once it hits the limit. */
+/** "Attempts 1/3" — how many times we have rung this contact back; the pale red pair once it hits the limit. */
 export const AttemptBadge = ({ n, max }: { n: number; max: number }) => {
   const t = useTheme();
   const maxed = n >= max;
@@ -437,13 +436,13 @@ export const AttemptBadge = ({ n, max }: { n: number; max: number }) => {
     <Pill
       label={maxed ? `Max attempts ${n}/${max}` : `Attempts ${n}/${max}`}
       icon={maxed ? 'block' : 'call_made'}
-      fg={maxed ? '#FFFFFF' : n > 0 ? t.c.warning : t.c.muted}
-      bg={maxed ? t.c.coral : n > 0 ? t.c.warningSoft : t.c.surfaceAlt}
+      fg={maxed ? t.c.danger : n > 0 ? t.c.warning : t.c.muted}
+      bg={maxed ? t.c.dangerSoft : n > 0 ? t.c.warningSoft : t.c.surfaceAlt}
     />
   );
 };
 
-/** The #1, #2… column: an item's position in the list as it is filtered and sorted right now. */
+/** The #1, #2… column: an item's position in the list as it is filtered and sorted right now. Grey: it is a rank, not a signal. */
 export const IndexBadge = memo(({ n, style }: { n: number; style?: StyleProp<ViewStyle> }) => {
   const s = useStyles();
   return (
@@ -525,12 +524,11 @@ export const Chip = memo(({ label, count, selected, onPress, icon }: { label: st
       accessibilityState={{ selected: !!selected }}
       style={[s.chip, selected && s.chipOn]}
     >
-      {selected && <Gradient colors={t.grad.primary} corner={999} style={StyleSheet.absoluteFill} pointerEvents="none" />}
-      {icon && <Icon name={icon} size={16} color={selected ? '#FFFFFF' : t.c.muted} />}
-      <Text style={[s.chipText, selected && { color: '#FFFFFF' }]}>{label}</Text>
+      {icon && <Icon name={icon} size={16} color={selected ? t.c.onPrimary : t.c.muted} />}
+      <Text style={[s.chipText, selected && { color: t.c.onPrimary }]}>{label}</Text>
       {count != null && (
-        <View style={[s.chipCount, selected && { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
-          <Text style={[s.chipCountText, selected && { color: '#FFFFFF' }]}>{count > 9999 ? '9999+' : count}</Text>
+        <View style={[s.chipCount, selected && s.chipCountOn]}>
+          <Text style={[s.chipCountText, selected && { color: t.c.onPrimary }]}>{count > 9999 ? '9999+' : count}</Text>
         </View>
       )}
     </Tactile>
@@ -566,9 +564,8 @@ export function Segmented<K extends string>({ options, value, onChange, style }:
             accessibilityState={{ selected: on }}
             style={[s.segBtn, on && s.segOn]}
           >
-            {on && <Gradient colors={t.grad.primary} corner={999} style={StyleSheet.absoluteFill} pointerEvents="none" />}
-            {o.icon && <Icon name={o.icon} size={16} color={on ? '#FFFFFF' : t.c.muted} />}
-            <Text style={[s.segText, on && { color: '#FFFFFF', fontWeight: '700' }]} numberOfLines={1}>{o.label}</Text>
+            {o.icon && <Icon name={o.icon} size={16} color={on ? t.c.onPrimary : t.c.muted} />}
+            <Text style={[s.segText, on && { color: t.c.onPrimary, fontWeight: '700' }]} numberOfLines={1}>{o.label}</Text>
           </Pressable>
         );
       })}
@@ -626,9 +623,7 @@ export const EmptyState = ({ icon, title, body, actionLabel, actionIcon, onActio
   const bg = tone === 'success' ? t.c.successSoft : tone === 'danger' ? t.c.dangerSoft : t.c.primarySoft;
   return (
     <Appear style={s.empty}>
-      <View style={[s.emptyIcon, { backgroundColor: bg }]}>
-        <Icon name={icon} size={30} color={fg} />
-      </View>
+      <View style={[s.emptyIcon, { backgroundColor: bg }]}><Icon name={icon} size={30} color={fg} /></View>
       <Text style={s.emptyTitle}>{title}</Text>
       {!!body && <Text style={s.emptyBody}>{body}</Text>}
       {!!actionLabel && (
@@ -682,34 +677,10 @@ export const Banner = ({ tone, icon, title, message, actionLabel, onAction, acti
   );
 };
 
-/** A grey block with a light band sweeping across it while the real content loads. One shared animation drives them all. */
-const shimmer = new Animated.Value(0);
-let shimmerUsers = 0;
-let shimmerLoop: Animated.CompositeAnimation | null = null;
-const BAND = 90;
-const sweep = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-BAND, Dimensions.get('window').width] });
-
+/** A flat grey block at the real size of the value it stands for, while the content loads. No shimmer. */
 export const Skeleton = ({ width = '100%', height = 14, r = 6, style }: { width?: number | `${number}%`; height?: number; r?: number; style?: StyleProp<ViewStyle> }) => {
   const t = useTheme();
-  useEffect(() => {
-    shimmerUsers++;
-    if (!shimmerLoop) {
-      shimmer.setValue(0);
-      shimmerLoop = Animated.loop(Animated.timing(shimmer, { toValue: 1, duration: 1300, easing: Easing.inOut(Easing.quad), useNativeDriver: true }));
-      shimmerLoop.start();
-    }
-    return () => {
-      shimmerUsers--;
-      if (!shimmerUsers && shimmerLoop) { shimmerLoop.stop(); shimmerLoop = null; }
-    };
-  }, []);
-  return (
-    <View style={[{ width, height, borderRadius: r, backgroundColor: t.c.skeleton, overflow: 'hidden' }, style]}>
-      <Animated.View
-        style={{ position: 'absolute', top: 0, bottom: 0, width: BAND, backgroundColor: t.c.shimmer, transform: [{ translateX: sweep }, { skewX: '-18deg' }] }}
-      />
-    </View>
-  );
+  return <View style={[{ width, height, borderRadius: r, backgroundColor: t.c.skeleton }, style]} />;
 };
 
 export const SkeletonCard = ({ lines = 3 }: { lines?: number }) => {
@@ -731,12 +702,10 @@ export const SkeletonCard = ({ lines = 3 }: { lines?: number }) => {
 export const ProgressBar = ({ value, color }: { value: number; color?: string }) => {
   const t = useTheme();
   const pct = Math.max(0, Math.min(1, value || 0)) * 100;
-  // The accent bar is the coral gradient; a status colour stays solid.
+  // The fill is the true ratio, and a zero has no stub.
   return (
     <View style={{ height: 8, borderRadius: 4, backgroundColor: t.c.surfaceAlt, overflow: 'hidden' }}>
-      {color
-        ? <View style={{ height: 8, borderRadius: 4, width: `${pct}%`, backgroundColor: color }} />
-        : pct > 0 && <Gradient colors={t.grad.primary} corner={4} style={{ height: 8, width: `${pct}%` }} />}
+      {pct > 0 && <View style={{ height: 8, borderRadius: 4, width: `${pct}%`, backgroundColor: color || t.c.primary }} />}
     </View>
   );
 };
@@ -758,7 +727,6 @@ export const Sheet = ({ visible, onClose, title, subtitle, children, footer, scr
       <View style={s.scrim}>
         <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" accessibilityRole="button" />
         <View style={s.sheet}>
-          <Leaves spot="bottom" />
           <View style={s.grabber} />
           <View style={s.sheetHead}>
             <View style={{ flex: 1 }}>
@@ -851,7 +819,7 @@ const useStyles = makeStyles((t) => ({
   btnSm: { minHeight: 36, paddingHorizontal: 14 },
   btnMd: { minHeight: 44, paddingHorizontal: 18 },
   btnLg: { minHeight: 52, paddingHorizontal: 22 },
-  btnSecondary: { backgroundColor: t.c.input },
+  btnSecondary: { backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.borderStrong },
   btnText: { fontSize: 14.5, fontWeight: '700' },
   btnTextSm: { fontSize: 13 },
   btnTextFilled: { fontWeight: '700' },
@@ -860,92 +828,96 @@ const useStyles = makeStyles((t) => ({
     position: 'absolute', top: 2, right: 0, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4,
     backgroundColor: t.c.danger, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: t.c.surface,
   },
-  badgeText: { color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' },
+  badgeText: { color: '#FFFFFF', fontSize: 11, fontWeight: '600', fontVariant: ['tabular-nums'] },
 
   card: {
     backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginBottom: space.md, ...elevation(t),
   },
 
   metric: { flex: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, padding: 14, ...elevation(t) },
-  metricTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  metricIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  metricValue: { ...type.metric, color: t.c.text, marginTop: 12 },
-  metricLabel: { fontSize: 12, fontWeight: '600', color: t.c.muted, marginTop: 1 },
-  metricSub: { fontSize: 11.5, color: t.c.faint, marginTop: 2 },
+  metricTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 },
+  metricIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  metricValue: { ...type.metric, color: t.c.text, marginTop: 10 },
+  metricDash: { color: t.c.faint, fontWeight: '400' },
+  metricLabel: { flexShrink: 1, fontSize: 12.5, fontWeight: '600', color: t.c.muted, marginTop: 1 },
+  metricSub: { fontSize: 12, color: t.c.muted, marginTop: 2 },
 
-  index: { minWidth: 34, height: 22, paddingHorizontal: 6, borderRadius: 8, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  indexText: { fontSize: 11.5, fontWeight: '800', color: t.c.link, fontVariant: ['tabular-nums'] },
+  index: { minWidth: 34, height: 22, paddingHorizontal: 6, borderRadius: radius.sm, backgroundColor: t.c.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  indexText: { fontSize: 12, fontWeight: '700', color: t.c.muted, fontVariant: ['tabular-nums'] },
 
-  pill: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: radius.pill, paddingHorizontal: 9, paddingVertical: 4, alignSelf: 'flex-start', maxWidth: '100%' },
+  pill: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', maxWidth: '100%', flexShrink: 0 },
   pillDot: { width: 6, height: 6, borderRadius: 3 },
-  pillText: { fontSize: 11.5, fontWeight: '700', flexShrink: 1 },
+  pillText: { fontSize: 12, fontWeight: '700', flexShrink: 1 },
 
-  sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.sm, marginBottom: space.sm + 2 },
-  sectionTitle: { ...type.overline, color: t.c.muted },
-  sectionAction: { fontSize: 13, fontWeight: '600', color: t.c.link },
+  sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.lg, marginBottom: space.md },
+  sectionTitle: { ...type.overline, color: t.c.text },
+  sectionAction: { fontSize: 13.5, fontWeight: '700', color: t.c.link },
 
   search: {
     flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: t.c.input,
-    borderRadius: radius.pill, paddingLeft: 16, paddingRight: 4, height: 48, marginBottom: space.md,
+    borderRadius: radius.pill, paddingLeft: 16, paddingRight: 4, height: 50, marginBottom: space.md, ...elevation(t),
   },
   searchInput: { flex: 1, fontSize: 14.5, color: t.c.text, paddingVertical: 0 },
 
-  fieldLabel: { ...type.label, color: t.c.textSoft, marginBottom: 6 },
+  fieldLabel: { fontSize: 13.5, fontWeight: '500', color: t.c.text, marginBottom: 8 },
   fieldHint: { fontSize: 12, color: t.c.muted, marginTop: 6, lineHeight: 17 },
   input: {
-    borderWidth: 1, borderColor: t.c.input, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12,
+    borderWidth: 1, borderColor: t.c.borderStrong, borderRadius: radius.lg, paddingHorizontal: 14, paddingVertical: 11,
     fontSize: 14.5, color: t.c.text, backgroundColor: t.c.input,
   },
 
   chipBar: { gap: 8, paddingBottom: space.md, paddingRight: space.lg },
   chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.input,
-    borderRadius: radius.pill, paddingLeft: 14, paddingRight: 10, minHeight: 36,
+    flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.border,
+    borderRadius: radius.pill, paddingLeft: 16, paddingRight: 12, minHeight: 40,
   },
-  chipOn: { backgroundColor: t.c.primary, ...glow(t), elevation: 4 },
-  chipText: { fontSize: 13, color: t.c.textSoft, fontWeight: '600', paddingRight: 4 },
-  chipCount: { minWidth: 22, height: 20, borderRadius: 10, paddingHorizontal: 6, backgroundColor: t.c.surface, alignItems: 'center', justifyContent: 'center' },
-  chipCountText: { fontSize: 11.5, fontWeight: '700', color: t.c.textSoft },
+  // Selected: the accent, filled — the bold, friendly pill of a 2026 consumer app.
+  chipOn: { backgroundColor: t.c.primary, borderColor: t.c.primary },
+  chipText: { fontSize: 13.5, color: t.c.textSoft, fontWeight: '600', paddingRight: 4 },
+  chipCount: { minWidth: 22, height: 20, borderRadius: 10, paddingHorizontal: 6, backgroundColor: t.c.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  chipCountOn: { backgroundColor: 'rgba(255,255,255,0.24)' },
+  chipCountText: { fontSize: 12, fontWeight: '700', color: t.c.textSoft, fontVariant: ['tabular-nums'] },
 
-  segment: { flexDirection: 'row', backgroundColor: t.c.input, borderRadius: radius.pill, padding: 4, marginBottom: space.md },
-  segBtn: { flex: 1, flexDirection: 'row', gap: 6, minHeight: 38, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
-  segOn: { ...glow(t), elevation: 4, backgroundColor: t.c.primary },
-  segText: { fontSize: 13, fontWeight: '600', color: t.c.muted },
-  select: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: t.c.input, borderRadius: 14, paddingHorizontal: 14, minHeight: 48 },
-  selectLabel: { fontSize: 13.5, fontWeight: '700', color: t.c.text, maxWidth: '40%' },
-  selectValue: { flex: 1, fontSize: 13.5, fontWeight: '600', color: t.c.link },
-  selectList: { backgroundColor: t.c.surface, borderRadius: 14, borderWidth: 1, borderColor: t.c.border, marginTop: 4, paddingVertical: 4, ...elevation(t) },
+  // A white track; the chosen option is a filled accent pill.
+  segment: { flexDirection: 'row', backgroundColor: t.c.surface, borderRadius: radius.pill, padding: 4, marginBottom: space.md, ...elevation(t) },
+  segBtn: { flex: 1, flexDirection: 'row', gap: 6, minHeight: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  segOn: { backgroundColor: t.c.primary },
+  segText: { fontSize: 13.5, fontWeight: '600', color: t.c.muted },
+  select: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: t.c.input, borderWidth: 1, borderColor: t.c.borderStrong, borderRadius: radius.lg, paddingHorizontal: 14, minHeight: 44 },
+  selectLabel: { fontSize: 13.5, fontWeight: '600', color: t.c.text, maxWidth: '40%' },
+  selectValue: { flex: 1, fontSize: 13.5, fontWeight: '500', color: t.c.textSoft },
+  selectList: { backgroundColor: t.c.surface, borderRadius: radius.lg, marginTop: 4, paddingVertical: 4, ...elevation(t, 3) },
   selectOpt: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 11, gap: 8 },
-  selectOptText: { flex: 1, fontSize: 14, color: t.c.textSoft, fontWeight: '600' },
+  selectOptText: { flex: 1, fontSize: 14, color: t.c.textSoft, fontWeight: '500' },
 
-  empty: { alignItems: 'center', paddingVertical: 44, paddingHorizontal: 28 },
+  empty: { alignItems: 'center', paddingVertical: 40, paddingHorizontal: 28 },
   emptyIcon: { width: 76, height: 76, borderRadius: 26, alignItems: 'center', justifyContent: 'center', marginBottom: space.lg },
   emptyTitle: { ...type.heading, color: t.c.text, textAlign: 'center' },
   emptyBody: { ...type.caption, color: t.c.muted, textAlign: 'center', marginTop: 6, maxWidth: 320 },
 
   banner: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: radius.lg, padding: 14, marginBottom: space.md },
-  bannerTitle: { fontSize: 14, fontWeight: '700', marginBottom: 2 },
-  bannerText: { fontSize: 12.5, color: t.c.textSoft, lineHeight: 18 },
-  bannerBtn: { borderWidth: 1.5, borderRadius: radius.pill, paddingHorizontal: 14, minHeight: 32, justifyContent: 'center', alignSelf: 'center' },
-  bannerBtnText: { fontSize: 12.5, fontWeight: '700' },
+  bannerTitle: { fontSize: 14, fontWeight: '600', marginBottom: 2 },
+  bannerText: { fontSize: 13, color: t.c.textSoft, lineHeight: 19 },
+  bannerBtn: { borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: 14, minHeight: 32, justifyContent: 'center', alignSelf: 'center' },
+  bannerBtnText: { fontSize: 13, fontWeight: '600' },
 
   scrim: { flex: 1, backgroundColor: t.c.scrim, justifyContent: 'flex-end' },
   sheet: {
-    backgroundColor: t.c.surface, borderTopLeftRadius: radius.xxl + 4, borderTopRightRadius: radius.xxl + 4,
+    backgroundColor: t.c.surface, borderTopLeftRadius: radius.xxl, borderTopRightRadius: radius.xxl,
     paddingHorizontal: space.xl, paddingBottom: space.xxl, maxHeight: '92%', overflow: 'hidden',
   },
-  grabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: t.c.borderStrong, marginTop: 10, marginBottom: 12 },
+  grabber: { alignSelf: 'center', width: 36, height: 4, borderRadius: 2, backgroundColor: t.c.borderStrong, marginTop: 10, marginBottom: 12 },
   sheetHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, marginBottom: space.lg },
   sheetTitle: { ...type.title, color: t.c.text },
-  sheetSub: { ...type.caption, color: t.c.muted, marginTop: 3 },
+  sheetSub: { fontSize: 13.5, lineHeight: 19, color: t.c.muted, marginTop: 3 },
 
   settingRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: t.c.surface, borderWidth: 1, borderColor: t.c.divider,
-    borderRadius: radius.lg, padding: 14, marginBottom: space.sm,
+    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: t.c.surface,
+    borderRadius: radius.lg, padding: 14, marginBottom: space.sm, ...elevation(t),
   },
-  rowIcon: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  rowIcon: { width: 40, height: 40, borderRadius: 13, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
   rowTitle: { fontSize: 14, fontWeight: '600', color: t.c.text },
-  rowDesc: { fontSize: 12.5, color: t.c.muted, marginTop: 2, lineHeight: 18 },
+  rowDesc: { fontSize: 13, color: t.c.muted, marginTop: 2, lineHeight: 18 },
 
   toast: {
     position: 'absolute', left: space.xl, right: space.xl, bottom: 84, flexDirection: 'row', alignItems: 'center', gap: 10,

@@ -105,7 +105,11 @@ const NO_ANSWER_TAGS = ['Not Answering'];
 
 const isMissed = (tp: string) => tp === 'MISSED' || tp === 'REJECTED' || tp === 'BLOCKED';
 
-/** This phone only: walks each number's calls oldest → newest; whatever is still owed is a callback. */
+/**
+ * This phone only: walks each number's calls oldest → newest; whatever is still owed is a callback.
+ * Called once is done: any call out to them after they became owed settles it, answered or not.
+ * A call tagged "Not Answering" was itself that attempt, so it settles too.
+ */
 export const pendingCallbacks = (calls: CallbackCall[]): Owed[] => {
   const byNumber = new Map<string, CallbackCall[]>();
   calls.forEach((c) => {
@@ -122,7 +126,7 @@ export const pendingCallbacks = (calls: CallbackCall[]): Owed[] => {
     list.forEach((c) => {
       const tag = c.outcome || '';
       const why: Reason | null = CALLBACK_TAGS.includes(tag) ? 'callback'
-        : NO_ANSWER_TAGS.includes(tag) ? 'no_answer'
+        : NO_ANSWER_TAGS.includes(tag) ? null
         : c.duration > 0 ? null
         : isMissed(c.callType) ? 'missed' : null;
       if (why) {
@@ -130,16 +134,24 @@ export const pendingCallbacks = (calls: CallbackCall[]): Owed[] => {
         else if (rank[why] >= rank[p.reason]) p.reason = why;
         p.lastAt = c.timestamp;
         if (why === 'missed') p.missed++;
-      } else if (c.duration > 0) {
-        p = null;                                   // spoke to them: nothing owed
-      } else if (p) {
-        p.tries++;                                  // rang back, no answer
-        p.lastAt = c.timestamp;
+      } else {
+        p = null;                                   // spoke to them, or called them once: nothing owed
       }
     });
     if (p) out.push(p);
   });
   return out.sort((a, b) => b.lastAt - a.lastAt);
+};
+
+/** The newest call this phone made to each number (last 10 digits → time), answered or not. */
+const lastCalledOut = (calls: CallbackCall[]) => {
+  const m = new Map<string, number>();
+  calls.forEach((c) => {
+    if (!c || (c.callType || '').toUpperCase() !== 'OUTGOING') return;
+    const k = last10(c.number);
+    if (k && (m.get(k) || 0) < c.timestamp) m.set(k, c.timestamp);
+  });
+  return m;
 };
 
 const REASON_LABEL: { [k in Reason]: string } = {
@@ -261,20 +273,26 @@ const CallbacksScreen = ({ active, syncEndpoint, calls, onDial, onCount, onItems
   }, [active]);
 
   /*
-   * What counts as a callback here: someone who missed us, asked to be called back, did not answer,
-   * or has a callback time. People who are only on an imported calling list are not callbacks (the
-   * Lists tab has them). And once they have been sent an SMS or a WhatsApp after that, they are
-   * handled — gone from here — unless a callback time was set for them.
+   * What counts as a callback here: someone who missed us, asked to be called back, or has a
+   * callback time. Calling lists are kept apart: their people and their tasks are in the Lists tab,
+   * never here. Called once is done: once anyone has rung them back after they became owed (the
+   * panel's tries, from any phone) or this phone has called them since, answered or not, they are
+   * gone. A call tagged "Not Answering" was itself that attempt. And once they have been sent an
+   * SMS or a WhatsApp after that, they are handled too — unless a callback time was set for them.
    */
   const messaged = useMessaged();
   const wa = useWaSend();
+  const calledOut = useMemo(() => lastCalledOut(calls), [calls]);
   const isOpen = useCallback((o: Owed) => {
-    if (o.reason === 'imported') return false;
+    if (o.reason === 'imported' || !!o.importStatus) return false;
+    if (o.reason === 'no_answer') return false;
     if (done[o.key] >= o.lastAt) return false;
+    if (o.tries > 0) return false;
+    if ((calledOut.get(o.key) || 0) >= (o.since || o.lastAt)) return false;
     if (o.dueAt || o.reason === 'scheduled') return true;
     const msg = Math.max(o.smsAt || 0, o.waAt || 0, messaged(o.number), wa.sentAt(o.number));
     return !(msg && msg >= o.lastAt);
-  }, [done, messaged, wa]);
+  }, [done, messaged, wa, calledOut]);
 
   const phoneItems = useMemo(() => pendingCallbacks(calls), [calls]);
   const teamItems = team && team.since === since ? team.items : null;

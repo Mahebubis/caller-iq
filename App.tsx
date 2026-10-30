@@ -28,6 +28,7 @@ import { HomeHero } from './src/HomeDash';
 import type { DialerInfo } from './src/ImportsScreen';
 import CallScreen from './src/CallScreen';
 import QuickCallSheet from './src/sheets/QuickCallSheet';
+import Intro, { shouldPlayIntro } from './src/Intro';
 import { Icon, IconButton, IconName, PulseDot, Tactile, ToastProvider, useToast } from './src/ui';
 import {
   BuildInfo, CallLogItem, PopupReadiness, ScheduleTarget, SetupInfo, SmsTarget, SetupStep, SimDiagnostics, SimNicknameMap, UssdSettings,
@@ -170,6 +171,8 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
   // "Is this the latest build?" — the note from BUILD_NOTE.txt, shown each time the app opens.
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [showBuildCard, setShowBuildCard] = useState<boolean>(false);
+  // The brand intro, once per cold start; the app loads underneath it.
+  const [introOn, setIntroOn] = useState<boolean>(shouldPlayIntro);
   const [connTest, setConnTest] = useState<{ busy: boolean; ok?: boolean; message?: string }>({ busy: false });
   // Read by the AppState listener, which must always see live values rather than a stale closure.
   const wizardRef = useRef<{ on: boolean; inFlight: string; attempted: Set<string> }>({ on: false, inFlight: '', attempted: new Set() });
@@ -333,10 +336,9 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
   }, [activeTab, activeDispositionCall, askConfirm, isPopupSetupOpen, isSimModalOpen, isAdminModalOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    // Version and build note are kept for Settings → About; startup shows the brand intro instead.
     CallBridge?.getBuildInfo?.().then((info: BuildInfo) => {
-      if (!info) return;
-      setBuildInfo(info);
-      if (String(info.note || '').trim()) setShowBuildCard(true);
+      if (info) setBuildInfo(info);
     }).catch(() => {});
     CallBridge?.getCalledBy?.().then((r: any) => {
       if (!r) return;
@@ -883,11 +885,11 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
     setActiveTab(key);
   };
 
-  // Home's plum hero runs up under the status bar; every other tab has the white header there.
+  // Every tab has the same header on the frame colour, so the system bars match it everywhere.
+  // While the intro plays it owns the bars (night), and hands them back when it ends.
   useEffect(() => {
-    if (activeTab === 'feed') CallBridge?.setSystemBarsTheme?.(true, t.grad.header[0]);
-    else CallBridge?.setSystemBarsTheme?.(t.dark, t.c.surface);
-  }, [activeTab, t]);
+    if (!introOn) CallBridge?.setSystemBarsTheme?.(t.dark, t.c.bg);
+  }, [t, introOn]);
 
   /* ── Focus workspace, mini call bar dispositions, search, keyboard ── */
   setCrmEndpoint(syncEndpoint);
@@ -1034,7 +1036,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
     if (k === 'start') setQuickCall(true);
     else setActiveTab(k === 'lists' ? 'imports' : k === 'callbacks' ? 'callbacks' : 'stats');
   }, []);
-  const syncPill = (glass: boolean) => (
+  const syncPill = (
     <Tactile
       onPress={sync.onPress}
       disabled={syncing}
@@ -1043,12 +1045,12 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
       accessibilityRole="button"
       accessibilityLabel={`Upload status: ${sync.label}`}
       hitSlop={6}
-      style={[s.syncPill, { backgroundColor: glass ? 'rgba(255,255,255,0.16)' : sync.bg }]}
+      style={[s.syncPill, { backgroundColor: sync.bg }]}
     >
       {syncing || pendingQueueCount > 0
         ? <PulseDot color={setup?.syncError ? t.c.coral : t.c.amber} size={7} />
-        : <Icon name={sync.icon} size={15} color={glass ? '#FFFFFF' : sync.fg} />}
-      <Text style={[s.syncText, { color: glass ? '#FFFFFF' : sync.fg }]}>{syncing ? 'Uploading…' : sync.label}</Text>
+        : <Icon name={sync.icon} size={15} color={sync.fg} />}
+      <Text style={[s.syncText, { color: sync.fg }]}>{syncing ? 'Uploading…' : sync.label}</Text>
     </Tactile>
   );
 
@@ -1057,19 +1059,18 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
     <EngageProvider calls={callLogs} ready={!!syncEndpoint}>
     <Expose to={engage} />
     <Gradient colors={t.grad.page} angle={180} style={s.container}>
-      {/* Header — Home has its own plum hero instead */}
-      {activeTab !== 'feed' && (
-        <View style={s.header}>
-          <View style={{ flex: 1, minWidth: 92 }}>
-            <Logo size={22} />
-            <Text style={s.brandSub} numberOfLines={1}>Internship Studio{setup?.model ? ` · ${setup.model}` : ''}</Text>
-          </View>
-          {syncPill(false)}
-          <WhatsAppBadge style={s.syncPill} textStyle={s.syncText} compact />
-          <IconButton icon="search" label="Find anyone (Ctrl+K)" tone="outlined" size={38} onPress={() => setSearchOpen(true)} />
-          <IconButton icon="settings" label="Settings" tone="outlined" size={38} badge={setupLeft} onPress={() => setIsAdminModalOpen(true)} />
+      {/* Header: the product, its scope (the team and this phone), upload and WhatsApp state,
+          search and settings — the same on every tab, on the frame colour. */}
+      <View style={s.header}>
+        <View style={{ flex: 1, minWidth: 92 }}>
+          <Logo size={20} />
+          <Text style={s.brandSub} numberOfLines={1}>Internship Studio{setup?.model ? ` · ${setup.model}` : ''}</Text>
         </View>
-      )}
+        {syncPill}
+        <WhatsAppBadge style={s.syncPill} textStyle={s.syncText} compact />
+        <IconButton icon="search" label="Find anyone (Ctrl+K)" size={42} tone="outlined" onPress={() => setSearchOpen(true)} />
+        <IconButton icon="settings" label="Settings" size={42} tone="outlined" badge={setupLeft} onPress={() => setIsAdminModalOpen(true)} />
+      </View>
 
       {activeTab !== 'feed' && <PointsBar onPress={() => setActiveTab('stats')} />}
       <DialRequestBanner onCall={handleDial} />
@@ -1099,18 +1100,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
           onSms={openSms}
           onFocus={openFocus}
           onTile={onTile}
-          hero={(
-            <HomeHero
-              name={calledBy}
-              bell={callbackCount}
-              onBell={seeCallbacks}
-              onAvatar={() => setIsAdminModalOpen(true)}
-              onSearch={() => setSearchOpen(true)}
-              setupLeft={setupLeft}
-              onSetup={() => setIsPopupSetupOpen(true)}
-              status={<>{syncPill(true)}<WhatsAppBadge style={s.syncPill} textStyle={s.syncText} /></>}
-            />
-          )}
+          hero={<HomeHero name={calledBy} calls={callLogs} waiting={callbackCount} onTile={onTile} />}
           simNicknames={simNicknames}
           onEditSims={editSims}
           onTag={tagCall}
@@ -1160,7 +1150,8 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
         <MiniCallBar call={activeCall} onPick={dispose} onOpen={() => setCallScreen(true)} onClose={() => setActiveCall(null)} />
       )}
 
-      {/* Bottom navigation */}
+      {/* The floating dock: a white pill over the page, and the raised centre button — the app's
+          one primary action, back to the call in progress or start one. */}
       <View style={s.dockWrap}>
         <View style={s.tabBar} accessibilityRole="tablist">
           {TABS.slice(0, 2).map((tb) => (
@@ -1171,7 +1162,6 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
             <TabItem key={tb.key} icon={tb.icon} label={tb.label} badge={tb.badge} on={activeTab === tb.key} onPress={() => pressTab(tb.key)} />
           ))}
         </View>
-        {/* The centre call button: back to the call in progress, or start one. */}
         <Tactile
           onPress={() => (activeCall ? setCallScreen(true) : setQuickCall(true))}
           scaleTo={0.9}
@@ -1180,9 +1170,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
           accessibilityLabel={activeCall ? 'Back to the call' : 'Start calling'}
           style={s.fab}
         >
-          <Gradient colors={t.grad.primary} angle={135} corner={32} style={s.fabInner}>
-            <Icon name={activeCall ? 'phone_in_talk' : 'call'} size={30} color="#FFFFFF" />
-          </Gradient>
+          <Icon name={activeCall ? 'phone_in_talk' : 'call'} size={28} color={t.c.onPrimary} />
         </Tactile>
       </View>
 
@@ -1297,6 +1285,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
         onThemePref={onThemePref}
         appearance={appearance}
         appVersion={buildInfo?.versionName || setup?.appVersion || ''}
+        onAbout={buildInfo ? () => { setIsAdminModalOpen(false); setShowBuildCard(true); } : undefined}
         unlocked={isAdminUnlocked}
         onUnlock={handleUnlock}
         endpoint={syncEndpoint}
@@ -1320,6 +1309,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
         onCheckBalance={checkBalanceNow}
         logs={systemLogs}
       />
+      {introOn && <Intro onDone={() => setIntroOn(false)} />}
     </Gradient>
     </EngageProvider>
     </WhatsAppProvider>
@@ -1368,13 +1358,14 @@ const TabItem = ({ icon, label, badge, on, onPress }: { icon: IconName; label: s
       accessibilityState={{ selected: on }}
       accessibilityLabel={badge ? `${label}, ${badge} pending` : label}
     >
+      {/* The selected tab: a soft accent pill behind the icon, the icon and label in the accent. */}
       <View style={[s.tabIndicator, on && { backgroundColor: t.c.primarySoft }]}>
-        <Icon name={icon} size={22} color={on ? t.c.link : t.c.muted} />
+        <Icon name={icon} size={23} color={on ? t.c.link : t.c.muted} />
         {!!badge && badge > 0 && (
           <View style={s.tabBadge}><Text style={s.tabBadgeText}>{badge > 99 ? '99+' : badge}</Text></View>
         )}
       </View>
-      <Text style={[s.tabLabel, on && { color: t.c.link, fontWeight: '700' }]}>{label}</Text>
+      <Text style={[s.tabLabel, on && { color: t.c.link, fontWeight: '800' }]}>{label}</Text>
     </Tactile>
   );
 };
@@ -1384,37 +1375,38 @@ const useStyles = makeStyles((t) => ({
   hidden: { display: 'none' },
 
   header: {
-    flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: space.lg, paddingVertical: 10,
-    backgroundColor: t.c.surface, borderBottomLeftRadius: 22, borderBottomRightRadius: 22, ...elevation(t), zIndex: 2,
+    flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: space.lg, paddingRight: space.sm, minHeight: 56,
+    backgroundColor: t.c.bg, zIndex: 2,
   },
-  brandSub: { fontSize: 11.5, color: t.c.muted, marginTop: 1 },
-  syncPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, minHeight: 30, borderRadius: radius.pill },
-  syncText: { fontSize: 12, fontWeight: '600' },
+  brandSub: { fontSize: 12, color: t.c.muted, marginTop: 1 },
+  syncPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, minHeight: 28, borderRadius: radius.pill },
+  syncText: { fontSize: 12, fontWeight: '500' },
   dialReq: {
     flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: space.lg, paddingVertical: 8,
-    backgroundColor: t.c.successSoft, borderBottomWidth: 1, borderBottomColor: t.c.emerald,
+    backgroundColor: t.c.successSoft, borderBottomWidth: 1, borderBottomColor: t.c.border,
   },
-  dialReqTitle: { fontSize: 14, fontWeight: '700', color: t.c.text },
-  dialReqBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.emerald, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 8 },
-  dialReqBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
+  dialReqTitle: { fontSize: 14, fontWeight: '600', color: t.c.text },
+  dialReqBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.success, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 8 },
+  dialReqBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 14 },
 
-  dockWrap: { paddingHorizontal: space.md, paddingBottom: space.sm, paddingTop: 22 },
+  dockWrap: { paddingHorizontal: space.md, paddingBottom: space.sm, paddingTop: 26, backgroundColor: 'transparent' },
   tabBar: {
-    flexDirection: 'row', backgroundColor: t.c.surface, borderRadius: 26, paddingTop: 8, paddingBottom: 8, ...elevation(t, 2),
+    flexDirection: 'row', alignItems: 'center', backgroundColor: t.c.surface, borderRadius: 30, paddingVertical: 8, ...elevation(t, 2),
   },
-  fabSlot: { width: 76 },
-  fab: { position: 'absolute', alignSelf: 'center', top: 0, borderRadius: 38, borderWidth: 4, borderColor: t.c.surface, backgroundColor: t.c.surface, ...glow(t), elevation: 12 },
-  fabInner: { width: 64, height: 64, alignItems: 'center', justifyContent: 'center' },
-  tabItem: { flex: 1, alignItems: 'center', minHeight: 52 },
-  // A background from the first frame: Android drops the corner radius when a colour is first
-  // added to a view later, which left the selected pill square on every tab but the first.
-  tabIndicator: { width: 60, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
-  tabLabel: { fontSize: 11.5, color: t.c.muted, fontWeight: '500', marginTop: 3 },
+  fabSlot: { width: 78 },
+  // Raised out of the dock, ringed in the page colour so it reads as cut out of the bar.
+  fab: {
+    position: 'absolute', alignSelf: 'center', top: 0, width: 66, height: 66, borderRadius: 33, backgroundColor: t.c.primary,
+    borderWidth: 5, borderColor: t.c.bg, alignItems: 'center', justifyContent: 'center', ...glow(t), elevation: 10,
+  },
+  tabItem: { flex: 1, alignItems: 'center', minHeight: 54, justifyContent: 'center' },
+  tabIndicator: { width: 52, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
+  tabLabel: { fontSize: 11.5, color: t.c.muted, fontWeight: '600', marginTop: 3 },
   tabBadge: {
-    position: 'absolute', top: -2, right: 6, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4,
+    position: 'absolute', top: -5, right: 2, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4,
     backgroundColor: t.c.danger, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: t.c.surface,
   },
-  tabBadgeText: { color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' },
+  tabBadgeText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700', fontVariant: ['tabular-nums'] },
 }));
 
 export default App;

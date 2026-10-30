@@ -2255,7 +2255,7 @@ const useStyles = makeStyles((t) => ({
 
   detailHead: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: space.lg },
   sumPill: {
-    flexBasis: '31%', flexGrow: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, borderWidth: 1.5, borderColor: 'transparent', ...elevation(t),
+    flexBasis: '31%', flexGrow: 1, backgroundColor: t.c.surface, borderRadius: radius.lg, ...elevation(t), borderWidth: 1.5, borderColor: t.c.border,
     paddingHorizontal: 9, paddingVertical: 9,
   },
   sumHead: { flexDirection: 'row', alignItems: 'center', gap: 5 },
@@ -2264,7 +2264,7 @@ const useStyles = makeStyles((t) => ({
   sumValue: { ...type.metric, fontSize: 19, marginTop: 4 },
 
   person: {
-    backgroundColor: t.c.surface, borderRadius: radius.xl, borderWidth: 1, borderColor: 'transparent',
+    backgroundColor: t.c.surface, borderRadius: radius.xl,
     padding: 14, marginBottom: 10, ...elevation(t),
   },
   callRound: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.c.successSoft, alignItems: 'center', justifyContent: 'center' },

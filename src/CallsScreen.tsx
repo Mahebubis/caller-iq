@@ -1,11 +1,11 @@
 import React, { forwardRef, memo, useCallback, useDeferredValue, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { FlatList, NativeModules, Pressable, RefreshControl, Text, View } from 'react-native';
+import { FlatList, NativeModules, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
 import { elevation, makeStyles, radius, space, type, useTheme } from './theme';
 import { Avatar } from './art';
 import { HomeTop } from './HomeDash';
 import { ago, callbackTime, callTime, clock, dueIn, last10, num, plural, prettyPhone } from './format';
 import {
-  Appear, AttemptBadge, Banner, Button, EmptyState, Icon, IconButton, IconName, IndexBadge, Pill, ProgressBar, PulseDot,
+  Appear, AttemptBadge, Banner, Button, EmptyState, Icon, IconButton, IconName, IndexBadge, ProgressBar, PulseDot,
   SearchField, Segmented, SectionHeader, Tactile,
 } from './ui';
 import { CallLogItem, MAX_ATTEMPTS, ScheduleTarget, SetupInfo, SIM_SOURCE_TEXT, SimNicknameMap, SmsTarget } from './types';
@@ -67,10 +67,12 @@ interface Props {
   onTile: (k: 'start' | 'lists' | 'callbacks' | 'reports') => void;
 }
 
-/* ── Live feed ──────────────────────────────────────────────────────────────
- * The newest calls that want an answer, one row per number: this phone's incoming and missed
- * calls of the last day, the team's missed calls, and callback tasks just imported from a list. */
-type FeedKind = 'incoming' | 'missed' | 'task' | 'scheduled';
+/* ── Callbacks on Home ───────────────────────────────────────────────────────
+ * Only callbacks, one row per number: missed calls nobody has called back yet (this phone's of the
+ * last day, and the team's), callbacks asked for, and callback times coming up. Calling lists are
+ * kept apart — their people are in their own section and the Lists tab — and answered calls are in
+ * Recent calls. Called once is done: a number this phone has called since it was missed leaves. */
+type FeedKind = 'missed' | 'callback' | 'scheduled';
 interface FeedItem {
   key: string;
   number: string;
@@ -85,11 +87,11 @@ interface FeedItem {
 }
 
 const FEED_WINDOW_MS = 24 * 60 * 60 * 1000;
-const TASK_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 const UPCOMING_MS = 3 * 60 * 60 * 1000;      // callback times coming up soon are listed
 const ALERT_WINDOW_MS = 12 * 60 * 60 * 1000;  // a due callback stays on top this long
 const ALERT_SOUND_MS = 5 * 60 * 1000;         // rings only if it fell due this recently
 const FEED_MAX = 8;
+const FEED_SHOWN = 4;
 
 /** Callbacks due now, top of the feed; then the rest, newest (or soonest) first. */
 const buildFeed = (calls: CallLogItem[], tasks: Owed[]): { alerts: Owed[]; items: FeedItem[] } => {
@@ -104,28 +106,36 @@ const buildFeed = (calls: CallLogItem[], tasks: Owed[]): { alerts: Owed[]; items
     const cur = byKey.get(it.key);
     if (!cur || cur.at < it.at) byKey.set(it.key, it);
   };
+  // The last time this phone rang each number, answered or not, and whether it ever got through.
+  const outAt = new Map<string, number>();
+  const spokeAt = new Map<string, number>();
   calls.forEach((c) => {
-    if (!c || c.timestamp < now - FEED_WINDOW_MS) return;
-    const tp = (c.callType || '').toUpperCase();
-    const kind: FeedKind | null = tp === 'INCOMING' ? 'incoming' : isMissed(tp) ? 'missed' : null;
-    const key = last10(c.number);
-    if (!kind || !key) return;
-    const o = info.get(key);
-    put({ key, number: c.number, kind, at: c.timestamp, name: o?.name, segment: o?.segment, tries: o?.tries, heat: o?.heat, dnd: o?.dnd });
+    const k = c && last10(c.number);
+    if (!k) return;
+    if ((c.callType || '').toUpperCase() === 'OUTGOING') outAt.set(k, Math.max(outAt.get(k) || 0, c.timestamp));
+    if (c.duration > 0) spokeAt.set(k, Math.max(spokeAt.get(k) || 0, c.timestamp));
   });
+  const settled = (k: string, since: number) => Math.max(outAt.get(k) || 0, spokeAt.get(k) || 0) >= since;
+  calls.forEach((c) => {
+    if (!c || c.timestamp < now - FEED_WINDOW_MS || !isMissed((c.callType || '').toUpperCase())) return;
+    const key = last10(c.number);
+    if (!key || settled(key, c.timestamp)) return;
+    const o = info.get(key);
+    put({ key, number: c.number, kind: 'missed', at: c.timestamp, name: o?.name, segment: o?.segment, tries: o?.tries, heat: o?.heat, dnd: o?.dnd });
+  });
+  // `tasks` arrives already settled by the Callbacks tab (no list tasks, called once is done).
   tasks.forEach((o) => {
     const base = { key: o.key, number: o.number, name: o.name, segment: o.segment, tries: o.tries, heat: o.heat, dnd: o.dnd };
     if (o.dueAt && o.dueAt > now && o.dueAt <= now + UPCOMING_MS) put({ ...base, kind: 'scheduled', at: o.dueAt });
-    else if (o.reason === 'imported' && o.since >= now - TASK_WINDOW_MS) put({ ...base, kind: 'task', at: o.since });
+    else if (o.reason === 'callback') put({ ...base, kind: 'callback', at: o.lastAt, agent: o.agent });
     else if (o.reason === 'missed' && o.lastAt >= now - FEED_WINDOW_MS) put({ ...base, kind: 'missed', at: o.lastAt, agent: o.agent });
   });
   return { alerts, items: Array.from(byKey.values()).sort((a, b) => b.at - a.at).slice(0, FEED_MAX) };
 };
 
 const FEED_KIND: { [k in FeedKind]: { label: string; icon: IconName; tone: 'success' | 'danger' | 'blue' } } = {
-  incoming: { label: 'Incoming', icon: 'call_received', tone: 'success' },
+  callback: { label: 'Asked for a callback', icon: 'phone_callback', tone: 'blue' },
   missed: { label: 'Missed call', icon: 'phone_missed', tone: 'danger' },
-  task: { label: 'New callback task', icon: 'format_list_bulleted', tone: 'blue' },
   scheduled: { label: 'Callback', icon: 'alarm', tone: 'blue' },
 };
 
@@ -149,6 +159,9 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onFoc
     return () => clearInterval(timer);
   }, []);
   const { alerts, items } = useMemo(() => buildFeed(calls, tasks), [calls, tasks, tick]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Four rows keep the Today card on the first screen; the rest are one tap away.
+  const [more, setMore] = useState(false);
+  const shown = more ? items : items.slice(0, FEED_SHOWN);
 
   // A callback set on this phone rings once (sound + vibration) as it falls due; the team's show
   // on top without ringing every phone.
@@ -210,46 +223,52 @@ const LiveFeed = memo(({ calls, tasks, onDial, onSeeAll, onSnooze, onDone, onFoc
         );
       })}
 
-      <View style={s.card}>
+      <View>
         <View style={s.feedHead}>
-          <PulseDot color={t.c.emerald} />
-          <Text style={s.feedTitle} accessibilityRole="header">Live call feed</Text>
+          <Text style={s.feedTitle} accessibilityRole="header">Callbacks</Text>
           <View style={{ flex: 1 }} />
-          <Pressable onPress={onSeeAll} hitSlop={10} accessibilityRole="button">
-            <Text style={s.link}>All callbacks</Text>
+          <Pressable onPress={onSeeAll} hitSlop={10} accessibilityRole="button" style={s.seeAll}>
+            <Text style={s.link}>See all{tasks.length ? ` (${num(tasks.length)})` : ''}</Text>
+            <Icon name="arrow_forward" size={15} color={t.c.link} />
           </Pressable>
         </View>
         {items.length === 0 ? (
-          <View style={s.listsEmpty}>
-            <Icon name="task_alt" size={20} color={t.c.success} />
-            <Text style={s.listsEmptyText}>Nothing waiting — incoming and missed calls, callbacks coming up, and tasks from new lists appear here.</Text>
+          <View style={[s.card, s.feedEmptyCard]}>
+            <View style={[s.feedEmptyIcon, { backgroundColor: t.tints.mint.bg }]}><Icon name="task_alt" size={22} color={t.tints.mint.fg} /></View>
+            <Text style={s.feedEmpty}>Nobody is waiting. Missed calls you haven't called back and callback times coming up land here.</Text>
           </View>
-        ) : items.map((it, i) => {
+        ) : shown.map((it, i) => {
           const k = FEED_KIND[it.kind];
-          const fg = k.tone === 'success' ? t.c.success : k.tone === 'danger' ? t.c.danger : t.c.blue;
-          const bg = k.tone === 'success' ? t.c.successSoft : k.tone === 'danger' ? t.c.dangerSoft : t.c.blueSoft;
+          const tint = k.tone === 'danger' ? t.tints.rose : k.tone === 'success' ? t.tints.mint : t.tints.sky;
           const number = prettyPhone(it.number) || it.number;
+          const extra = [it.segment, it.tries != null ? `tries ${it.tries}/${MAX_ATTEMPTS}` : '', it.heat ? `heat ${it.heat}` : ''].filter(Boolean).join('  ·  ');
           return (
-            <Appear key={it.key} index={i} style={[s.feedRow, i > 0 && s.listRowDivider]}>
-              <IndexBadge n={wa.replies.length + alerts.length + i + 1} />
-              <Avatar name={it.name} phone={it.number} size={42} />
-              <Pressable style={{ flex: 1, gap: 3 }} onPress={() => onFocus({ number: it.number, name: it.name, segment: it.segment, attempts: it.tries })} accessibilityRole="button" accessibilityLabel={`Open ${it.name || number}`}>
+            <Appear key={it.key} index={i} style={s.feedRow}>
+              <Avatar name={it.name} phone={it.number} size={46} />
+              <Pressable style={{ flex: 1 }} onPress={() => onFocus({ number: it.number, name: it.name, segment: it.segment, attempts: it.tries })} accessibilityRole="button" accessibilityLabel={`Open ${it.name || number}`}>
                 <Text style={s.feedName} numberOfLines={1}>{it.name || number}</Text>
-                <Text style={s.listMeta} numberOfLines={1}>{it.name ? `${number} · ` : ''}{it.kind === 'scheduled' ? dueIn(it.at) : ago(it.at)}{it.agent ? ` · ${it.agent}` : ''}</Text>
-                <Pill label={it.kind === 'scheduled' ? `${k.label} ${callbackTime(it.at)}` : k.label} icon={k.icon} fg={fg} bg={bg} />
-                {(!!it.segment || it.tries != null || !!it.heat) && (
-                  <View style={s.feedTags}>
-                    {!!it.segment && <Pill label={it.segment} fg={t.c.textSoft} bg={t.c.surfaceAlt} icon="sell" />}
-                    {it.tries != null && <AttemptBadge n={it.tries} max={MAX_ATTEMPTS} />}
-                    {!!it.heat && <Pill label={`Heat ${it.heat}`} icon="local_fire_department" fg={it.heat >= 70 ? t.c.danger : t.c.orange} bg={t.c.surfaceAlt} />}
+                <View style={s.feedTagRow}>
+                  <View style={[s.feedTag, { backgroundColor: tint.bg }]}>
+                    <Icon name={k.icon} size={13} color={tint.fg} />
+                    <Text style={[s.feedTagText, { color: tint.fg }]} numberOfLines={1}>{it.kind === 'scheduled' ? callbackTime(it.at) : k.label}</Text>
                   </View>
-                )}
+                  <Text style={s.feedMeta} numberOfLines={1}>{it.kind === 'scheduled' ? dueIn(it.at) : ago(it.at)}</Text>
+                </View>
+                {!!(extra || it.agent) && <Text style={[s.feedMeta, { marginTop: 4 }, it.tries != null && it.tries >= MAX_ATTEMPTS && { color: t.c.danger }]} numberOfLines={1}>{[it.agent, extra].filter(Boolean).join('  ·  ')}</Text>}
               </Pressable>
-              <IconButton icon="chat" label={`Auto-WhatsApp ${it.name || number}`} size={36} tone="outlined" disabled={!!it.dnd} onPress={() => wa.openSend({ name: it.name, phone: it.number, segment: it.segment })} />
-              <Button label="Call" icon="call" size="sm" variant="success" pill onPress={() => onDial(it.number)} accessibilityLabel={`Call ${it.name || number} now`} />
+              {/* WhatsApp and Call: two fixed round actions, so the name and the time keep their width. */}
+              <IconButton icon="chat" label={`Auto-WhatsApp ${it.name || number}`} size={42} tone="outlined" color={t.c.textSoft} disabled={!!it.dnd} onPress={() => wa.openSend({ name: it.name, phone: it.number, segment: it.segment })} />
+              <Tactile onPress={() => onDial(it.number)} scaleTo={0.9} unstable_pressDelay={0} accessibilityRole="button" accessibilityLabel={`Call ${it.name || number} now`} style={s.callRound}>
+                <Icon name="call" size={20} color="#FFFFFF" />
+              </Tactile>
             </Appear>
           );
         })}
+        {items.length > FEED_SHOWN && (
+          <Pressable onPress={() => setMore(!more)} hitSlop={6} accessibilityRole="button" style={s.feedMore}>
+            <Text style={s.link}>{more ? 'Show fewer' : `Show ${items.length - FEED_SHOWN} more`}</Text>
+          </Pressable>
+        )}
       </View>
     </View>
   );
@@ -298,7 +317,6 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
   const header = (
     <View>
       {p.hero}
-      <HomeTop calls={p.calls} callbacks={p.tasks.length} onTile={p.onTile} />
 
       {/* Everything this phone still needs, from one list that knows this Android version and maker. */}
       {(setupOff.length > 0 || setupUnsure.length > 0) && (
@@ -328,49 +346,68 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
 
       <LiveFeed calls={p.calls} tasks={p.tasks} onDial={p.onDial} onSeeAll={p.onSeeCallbacks} onSnooze={p.onSnooze} onDone={p.onDoneCallback} onSms={p.onSms} onFocus={p.onFocus} />
 
-      {/* The admin's calling lists, by name — one tap opens the list in the Lists tab. */}
-      <SectionHeader title="Calling lists" action={p.lists.length ? `See all (${p.lists.length})` : 'Open'} onAction={p.onSeeAllLists} />
-      <View style={s.card}>
-        {p.lists.length === 0 ? (
-          <View style={s.listsEmpty}>
-            <Icon name="format_list_bulleted" size={20} color={t.c.faint} />
-            <Text style={s.listsEmptyText}>Lists uploaded in the admin panel (Caller IQ → Imports) appear here.</Text>
-          </View>
-        ) : (
-          p.lists.slice(0, 3).map((l, i) => {
+      <HomeTop calls={p.calls} callbacks={p.tasks.length} onTile={p.onTile} />
+
+      {/* The admin's calling lists: their own section, never mixed into Callbacks. A carousel of
+          cards, each with a coloured cover carrying how much of the list is called. */}
+      <View style={s.feedHead}>
+        <Text style={s.feedTitle} accessibilityRole="header">Calling lists</Text>
+        <View style={{ flex: 1 }} />
+        <Pressable onPress={p.onSeeAllLists} hitSlop={10} accessibilityRole="button" style={s.seeAll}>
+          <Text style={s.link}>{p.lists.length ? `See all (${p.lists.length})` : 'Open'}</Text>
+          <Icon name="arrow_forward" size={15} color={t.c.link} />
+        </Pressable>
+      </View>
+      {p.lists.length === 0 ? (
+        <View style={[s.card, s.feedEmptyCard]}>
+          <View style={[s.feedEmptyIcon, { backgroundColor: t.tints.sky.bg }]}><Icon name="format_list_bulleted" size={22} color={t.tints.sky.fg} /></View>
+          <Text style={s.feedEmpty}>Lists uploaded in the admin panel (Caller IQ → Imports) appear here.</Text>
+        </View>
+      ) : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.carousel} contentContainerStyle={s.carouselIn}>
+          {p.lists.slice(0, 8).map((l, i) => {
             const people = l.stored_rows || l.total_rows || 0;
             const base = Math.max(1, l.with_phone || people);
             const left = toCall(l);
             const start: Show = l.to_call == null ? 'never' : 'to_call';
+            const pct = Math.min(1, (l.called || 0) / base);
+            const tint = [t.tints.sky, t.tints.peach, t.tints.berry, t.tints.mint, t.tints.butter, t.tints.rose][i % 6];
             return (
               <Tactile
                 key={l.id}
                 onPress={() => p.onOpenList(l.id)}
-                scaleTo={0.97}
+                scaleTo={0.96}
                 accessibilityRole="button"
                 accessibilityLabel={`Open ${l.name}`}
-                style={[s.listRow, i > 0 && s.listRowDivider]}
+                style={s.listCard}
               >
-                <View style={s.listIcon}><Icon name="format_list_bulleted" size={20} color={t.c.link} /></View>
-                <View style={{ flex: 1, gap: 6 }}>
-                  <Text style={s.listName} numberOfLines={1}>{l.name}</Text>
-                  <ProgressBar value={(l.called || 0) / base} />
-                  <Text style={s.listMeta}>{num(people)} people · {num(left)} to call</Text>
+                <View style={[s.listCover, { backgroundColor: tint.bg }]}>
+                  <Icon name="format_list_bulleted" size={96} color={tint.fg} style={s.listCoverArt} />
+                  <Text style={[s.listPct, { color: tint.fg }]}>{Math.round(pct * 100)}%</Text>
+                  <Text style={[s.listPctLabel, { color: tint.fg }]}>called</Text>
                 </View>
-                <Button
-                  label={left > 0 ? 'Call' : 'Open'}
-                  icon={left > 0 ? 'call' : undefined}
-                  size="sm"
-                  pill
-                  variant={left > 0 ? 'success' : 'soft'}
-                  onPress={() => p.onOpenList(l.id, left > 0 ? start : 'all')}
-                  accessibilityLabel={`${left > 0 ? 'Start calling' : 'Open'} ${l.name}`}
-                />
+                <View style={s.listBody}>
+                  <Text style={s.listName} numberOfLines={2}>{l.name}</Text>
+                  <ProgressBar value={pct} color={tint.fg} />
+                  <View style={s.listFoot}>
+                    <Text style={s.listMeta} numberOfLines={1}><Text style={s.listLeft}>{num(left)}</Text> to call · {num(people)}</Text>
+                    <Tactile
+                      onPress={() => p.onOpenList(l.id, left > 0 ? start : 'all')}
+                      scaleTo={0.9}
+                      unstable_pressDelay={0}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${left > 0 ? 'Start calling' : 'Open'} ${l.name}`}
+                      style={[s.listGo, left > 0 ? { backgroundColor: t.c.primary } : { backgroundColor: t.c.surfaceAlt }]}
+                    >
+                      <Icon name={left > 0 ? 'call' : 'chevron_right'} size={18} color={left > 0 ? '#FFFFFF' : t.c.textSoft} />
+                    </Tactile>
+                  </View>
+                </View>
               </Tactile>
             );
-          })
-        )}
-      </View>
+          })}
+        </ScrollView>
+      )}
 
       {/* Dual-SIM labels */}
       <Tactile
@@ -379,7 +416,7 @@ const CallsScreen = forwardRef<CallsHandle, Props>((p, ref) => {
         accessibilityLabel="Edit SIM labels"
         style={[s.card, s.simCard]}
       >
-        <View style={s.simIcon}><Icon name="sim_card" size={20} color={t.c.link} /></View>
+        <View style={[s.simIcon, { backgroundColor: t.tints.butter.bg }]}><Icon name="sim_card" size={20} color={t.tints.butter.fg} /></View>
         <View style={{ flex: 1 }}>
           <Text style={s.simTitle} numberOfLines={1}>{simLabel(p.simNicknames, 'SIM 1')}</Text>
           <Text style={s.simSub} numberOfLines={1}>{simLabel(p.simNicknames, 'SIM 2')}</Text>
@@ -487,7 +524,7 @@ const CallRow = memo(({ item, index, sim, onTag, onDial, onSchedule }: {
         {!!item.number && (
           <>
             <IconButton icon="alarm" label={`Schedule a callback for ${number}`} tone="outlined" size={36} onPress={() => onSchedule({ number: item.number })} />
-            <Button label="Call" icon="call" size="sm" variant="success" pill onPress={() => onDial(item.number)} accessibilityLabel={`Call ${number}`} />
+            <Button label="Call" icon="call" iconColor={t.c.success} size="sm" variant="secondary" pill onPress={() => onDial(item.number)} accessibilityLabel={`Call ${number}`} />
           </>
         )}
       </View>
@@ -502,40 +539,59 @@ const useStyles = makeStyles((t) => ({
   card: {
     backgroundColor: t.c.surface, borderRadius: radius.xl, padding: space.lg, marginBottom: space.md, ...elevation(t),
   },
-  link: { fontSize: 13, fontWeight: '600', color: t.c.link },
+  link: { fontSize: 13.5, fontWeight: '700', color: t.c.link },
+  seeAll: { flexDirection: 'row', alignItems: 'center', gap: 4 },
 
-  listsEmpty: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  listsEmptyText: { flex: 1, fontSize: 12.5, color: t.c.muted, lineHeight: 18 },
-  listRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
-  listRowDivider: { borderTopWidth: 1, borderTopColor: t.c.divider },
-  listIcon: { width: 40, height: 40, borderRadius: radius.md, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  listName: { fontSize: 15, fontWeight: '600', color: t.c.text },
-  listMeta: { fontSize: 12, color: t.c.muted },
+  listName: { fontSize: 15.5, fontWeight: '700', letterSpacing: -0.2, color: t.c.text, lineHeight: 20, minHeight: 40 },
+  listMeta: { fontSize: 12.5, fontWeight: '500', color: t.c.muted, fontVariant: ['tabular-nums'], flexShrink: 1 },
+  listLeft: { fontWeight: '800', color: t.c.text },
+  carousel: { marginHorizontal: -space.lg, marginBottom: space.sm },
+  carouselIn: { paddingHorizontal: space.lg, paddingTop: 2, paddingBottom: 14, gap: 12 },
+  listCard: { width: 230, backgroundColor: t.c.surface, borderRadius: radius.xl, overflow: 'hidden', ...elevation(t) },
+  listCover: { height: 104, padding: 16, justifyContent: 'flex-end', overflow: 'hidden' },
+  listCoverArt: { position: 'absolute', right: -14, top: -14, opacity: 0.16, transform: [{ rotate: '-10deg' }] },
+  listPct: { fontSize: 34, fontWeight: '800', letterSpacing: -1.2, fontVariant: ['tabular-nums'] },
+  listPctLabel: { fontSize: 13, fontWeight: '700', marginTop: -4 },
+  listBody: { padding: 14, gap: 10 },
+  listFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  listGo: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
 
-  feedHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
-  feedTitle: { ...type.heading, color: t.c.text },
-  feedRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10 },
-  feedName: { fontSize: 14.5, fontWeight: '600', color: t.c.text },
-  feedTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  feedHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: space.lg, marginBottom: space.md },
+  feedTitle: { ...type.overline, fontSize: 19, color: t.c.text },
+  feedRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: t.c.surface, borderRadius: radius.lg,
+    padding: 12, paddingRight: 12, marginBottom: 10, ...elevation(t),
+  },
+  feedName: { fontSize: 15.5, fontWeight: '700', letterSpacing: -0.2, color: t.c.text, fontVariant: ['tabular-nums'] },
+  feedTagRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 5 },
+  feedTag: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 1 },
+  feedTagText: { fontSize: 12, fontWeight: '700' },
+  feedMeta: { fontSize: 12.5, fontWeight: '500', color: t.c.muted },
+  feedEmptyCard: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  feedEmptyIcon: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  feedEmpty: { flex: 1, fontSize: 13.5, color: t.c.muted, lineHeight: 20 },
+  feedMore: { paddingVertical: 6, alignItems: 'center' },
+  callRound: { width: 44, height: 44, borderRadius: 22, backgroundColor: t.c.success, alignItems: 'center', justifyContent: 'center' },
 
+  // A callback that has fallen due: a rose card that cannot be missed, the due time in words.
   alert: {
-    backgroundColor: t.c.dangerSoft, borderRadius: radius.xl, borderWidth: 2, borderColor: t.c.coral,
+    backgroundColor: t.tints.rose.bg, borderRadius: radius.xl,
     padding: space.lg, marginBottom: space.md, gap: 6,
   },
   alertHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  alertTitle: { ...type.overline, color: t.c.danger, flex: 1 },
-  alertWhen: { fontSize: 12.5, fontWeight: '800', color: t.c.danger },
-  alertName: { ...type.cardTitle, color: t.c.text },
-  alertNote: { fontSize: 13, color: t.c.textSoft, fontStyle: 'italic' },
+  alertTitle: { fontSize: 13.5, fontWeight: '800', color: t.tints.rose.fg, flex: 1 },
+  alertWhen: { fontSize: 13.5, fontWeight: '800', color: t.tints.rose.fg, fontVariant: ['tabular-nums'] },
+  alertName: { ...type.cardTitle, fontSize: 18, color: t.c.text },
+  alertNote: { fontSize: 13.5, color: t.c.textSoft, fontStyle: 'italic', lineHeight: 19 },
   alertBtns: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   replyAlert: {
-    backgroundColor: t.c.violetSoft, borderRadius: radius.xl, borderWidth: 2, borderColor: t.c.violet,
+    backgroundColor: t.tints.berry.bg, borderRadius: radius.xl,
     padding: space.lg, marginBottom: space.md, gap: 6,
   },
 
   simCard: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
-  simIcon: { width: 38, height: 38, borderRadius: 10, backgroundColor: t.c.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  simTitle: { fontSize: 13.5, fontWeight: '600', color: t.c.text },
+  simIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  simTitle: { fontSize: 14, fontWeight: '600', color: t.c.text },
   simSub: { fontSize: 12.5, color: t.c.muted, marginTop: 2 },
 
   callCard: {
@@ -547,12 +603,12 @@ const useStyles = makeStyles((t) => ({
   },
   callTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   callTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  callNumber: { flex: 1, fontSize: 15.5, fontWeight: '600', color: t.c.text, letterSpacing: 0.2 },
-  callTime: { fontSize: 11.5, color: t.c.faint },
-  callMeta: { fontSize: 12.5, color: t.c.muted, marginTop: 4 },
+  callNumber: { flex: 1, fontSize: 15, fontWeight: '600', color: t.c.text, letterSpacing: 0.2, fontVariant: ['tabular-nums'] },
+  callTime: { fontSize: 12, color: t.c.muted, fontVariant: ['tabular-nums'] },
+  callMeta: { fontSize: 13, color: t.c.muted, marginTop: 4, fontVariant: ['tabular-nums'] },
   simOk: { color: t.c.textSoft, fontWeight: '500' },
   simUnknown: { color: t.c.warning, fontWeight: '600' },
-  simHint: { fontSize: 11, color: t.c.faint, marginTop: 2 },
+  simHint: { fontSize: 12, color: t.c.muted, marginTop: 2 },
   callFooter: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: t.c.divider },
   outcomeChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1, minHeight: 36,

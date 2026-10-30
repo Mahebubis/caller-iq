@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, AppState, Dimensions, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
 import { makeStyles, radius, space, useTheme } from './theme';
-import { crm, Award, RANK_ICON, RULE_LABEL, Stats } from './crm';
+import { crm, Award, RULE_LABEL, Stats } from './crm';
 import { CallLogItem } from './types';
 import { num } from './format';
 import { useToast } from './ui';
@@ -110,7 +110,7 @@ export function EngageProvider({ calls, ready, children }: { calls: CallLogItem[
   );
 }
 
-/** The strip under the header: ⚡ today · 🔥 streak · shift goal · rank. */
+/** The strip under the header: points today · streak · people called against the goal · rank. */
 export function PointsBar({ onPress }: { onPress: () => void }) {
   const t = useTheme();
   const s = useStyles();
@@ -119,14 +119,14 @@ export function PointsBar({ onPress }: { onPress: () => void }) {
   const pct = Math.min(1, p.cleared / goal);
   const rank = p.stats?.rank.name || 'Rookie';
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${p.stats?.today ?? 0} points today, streak ${p.streak}, ${p.cleared} of ${goal} cleared, rank ${rank}. Open stats`} style={s.bar}>
-      <Text style={s.pts}>⚡ {num(p.stats?.today ?? 0)}<Text style={s.unit}> pts</Text></Text>
-      <Text style={[s.streak, p.streak >= 3 && { color: t.c.orange }]}>🔥 {p.streak}</Text>
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${p.stats?.today ?? 0} points today, streak ${p.streak}, ${p.cleared} of ${goal} people called, rank ${rank}. Open stats`} style={s.bar}>
+      <Text style={s.pts}>{num(p.stats?.today ?? 0)}<Text style={s.unit}> pts</Text></Text>
+      <Text style={s.streak}><Text style={s.unit}>streak </Text>{p.streak}</Text>
       <View style={s.goal}>
-        <View style={s.goalTrack}><View style={[s.goalFill, { width: `${Math.round(pct * 100)}%`, backgroundColor: pct >= 1 ? t.c.emerald : t.c.primary }]} /></View>
-        <Text style={s.goalText} numberOfLines={1}>Cleared {p.cleared}/{goal}</Text>
+        <View style={s.goalTrack}>{pct > 0 && <View style={[s.goalFill, { width: `${Math.round(pct * 100)}%`, backgroundColor: pct >= 1 ? t.c.success : t.c.primary }]} />}</View>
+        <Text style={s.goalText} numberOfLines={1}>{num(p.cleared)} of {num(goal)} called</Text>
       </View>
-      <View style={s.rank}><Text style={s.rankText} numberOfLines={1}>{RANK_ICON[rank] || '🌱'} {rank}</Text></View>
+      <Text style={s.rankText} numberOfLines={1}>{rank}</Text>
     </Pressable>
   );
 }
@@ -137,7 +137,7 @@ const UndoBar = ({ label, onUndo, onClose }: { label: string; onUndo: () => void
     <View style={s.undo} pointerEvents="box-none">
       <View style={s.undoInner}>
         <Text style={s.undoText} numberOfLines={2}>{label}</Text>
-        <Pressable onPress={onUndo} hitSlop={10} accessibilityRole="button"><Text style={s.undoBtn}>UNDO</Text></Pressable>
+        <Pressable onPress={onUndo} hitSlop={10} accessibilityRole="button"><Text style={s.undoBtn}>Undo</Text></Pressable>
         <Pressable onPress={onClose} hitSlop={10} accessibilityRole="button" accessibilityLabel="Dismiss"><Text style={s.undoX}>✕</Text></Pressable>
       </View>
     </View>
@@ -185,18 +185,17 @@ const Confetti = () => {
 
 const useStyles = makeStyles((t) => ({
   bar: {
-    flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: space.lg, paddingVertical: 7,
-    backgroundColor: t.c.surface, borderBottomWidth: 1, borderBottomColor: t.c.border,
+    flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: space.lg, paddingBottom: 10, paddingTop: 2,
+    backgroundColor: t.c.bg,
   },
-  pts: { fontSize: 13.5, fontWeight: '800', color: t.c.link, fontVariant: ['tabular-nums'] },
-  unit: { fontSize: 11, fontWeight: '600', color: t.c.muted },
-  streak: { fontSize: 13, fontWeight: '800', color: t.c.textSoft, fontVariant: ['tabular-nums'] },
-  goal: { flex: 1, gap: 3 },
-  goalTrack: { height: 5, borderRadius: 3, backgroundColor: t.c.surfaceAlt, overflow: 'hidden' },
-  goalFill: { height: 5, borderRadius: 3 },
-  goalText: { fontSize: 10.5, color: t.c.muted, fontWeight: '600' },
-  rank: { backgroundColor: t.c.violetSoft, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3, maxWidth: 120 },
-  rankText: { fontSize: 11, fontWeight: '700', color: t.c.violet },
+  pts: { fontSize: 14, fontWeight: '600', color: t.c.text, fontVariant: ['tabular-nums'] },
+  unit: { fontSize: 12, fontWeight: '400', color: t.c.muted },
+  streak: { fontSize: 14, fontWeight: '600', color: t.c.text, fontVariant: ['tabular-nums'] },
+  goal: { flex: 1, gap: 4 },
+  goalTrack: { height: 4, borderRadius: 2, backgroundColor: t.c.border, overflow: 'hidden' },
+  goalFill: { height: 4, borderRadius: 2 },
+  goalText: { fontSize: 12, color: t.c.muted, fontVariant: ['tabular-nums'] },
+  rankText: { fontSize: 12.5, fontWeight: '500', color: t.c.textSoft, maxWidth: 110 },
   undo: { position: 'absolute', left: space.md, right: space.md, bottom: 84, alignItems: 'center' },
   undoInner: {
     flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: t.c.toastBg, borderRadius: radius.md,

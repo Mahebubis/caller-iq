@@ -34,3 +34,6 @@ whatsapp-bridge/.wwebjs_auth/
 whatsapp-bridge/.wwebjs_cache/
 whatsapp-bridge/data/
 whatsapp-bridge/.env
+
+# Design working notes (taste skill)
+.taste-skill/
