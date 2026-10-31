@@ -5,7 +5,7 @@ import { Gradient } from '../art';
 import type { Appearance } from '../../App';
 import { ago } from '../format';
 import { Button, Chip, Field, Icon, Segmented, Sheet, SettingRow } from '../ui';
-import { SimDiagnostics, SimNicknameMap, UssdSettings } from '../types';
+import { RecordingSettings, SimDiagnostics, SimNicknameMap, UssdSettings } from '../types';
 
 /*
  * Settings. Appearance is for everyone; the rest (server, popup, SIM detection, balance checks,
@@ -53,6 +53,9 @@ interface Props {
   onToggleUssd: (on: boolean) => void;
   onUssdCode: (slot: number, code: string) => void;
   onCheckBalance: (slot: number) => void;
+
+  recording: RecordingSettings | null;
+  onToggleRecording: (on: boolean) => void;
 
   logs: string[];
 }
@@ -226,6 +229,34 @@ export default function SettingsSheet(p: Props) {
             {Object.keys(p.simDiag.learned || {}).length} phone account{Object.keys(p.simDiag.learned || {}).length === 1 ? '' : 's'} learned from this
             phone’s call log. The Calls tab shows how each call was matched.
           </Text>
+
+          {/* ── Call recordings ── */}
+          <Text style={s.section}>Call recordings</Text>
+          {!p.recording ? (
+            <Text style={s.desc}>Update the app to upload call recordings.</Text>
+          ) : (
+            <>
+              <SettingRow
+                icon="mic"
+                title="Upload call recordings"
+                desc="After each connected call, sends the recording the phone’s dialer saved to the dashboard, next to the call."
+                right={<Switch value={p.recording.enabled} onValueChange={p.onToggleRecording} {...switchColors(p.recording.enabled)} accessibilityLabel="Upload call recordings" />}
+              />
+              {p.recording.enabled && !p.recording.permission && (
+                <Text style={s.desc}>Access to audio files is needed to find the recordings. Switch this off and on again and tap Allow.</Text>
+              )}
+              {p.recording.enabled && (
+                <Text style={s.desc}>
+                  {p.recording.today} uploaded today{p.recording.lastOkAt ? ` · last ${ago(p.recording.lastOkAt)}` : ''}
+                  {p.recording.note ? `\n${p.recording.note}${p.recording.noteAt ? ` (${ago(p.recording.noteAt)})` : ''}` : ''}
+                </Text>
+              )}
+              <Text style={s.desc}>
+                Turn on automatic call recording in the phone’s own dialer (Phone → Settings → Call recording → record all calls). Phones that use
+                Google’s Phone app keep recordings private, so there is nothing to upload from them.
+              </Text>
+            </>
+          )}
 
           {/* ── SIM balance (USSD) ── */}
           <Text style={s.section}>SIM balance & validity</Text>

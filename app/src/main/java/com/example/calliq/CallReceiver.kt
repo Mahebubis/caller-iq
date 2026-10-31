@@ -24,6 +24,8 @@ class CallReceiver(private val viaService: Boolean = false) : BroadcastReceiver(
 
         val stateStr = intent.getStringExtra(TelephonyManager.EXTRA_STATE) ?: return
         val prefs = context.getSharedPreferences(CallIqConfig.PREFS, Context.MODE_PRIVATE)
+        // Lets the app tell "back from a call" (no intro) from "opened again" (intro).
+        prefs.edit().putLong(KEY_LAST_CALL_EVENT_AT, System.currentTimeMillis()).apply()
         val prevState = prefs.getString("PREV_STATE", TelephonyManager.EXTRA_STATE_IDLE)
 
         Log.d("CallReceiver", "Phone state transition detected: prev=$prevState, new=$stateStr")
@@ -136,6 +138,8 @@ class CallReceiver(private val viaService: Boolean = false) : BroadcastReceiver(
     }
 
     companion object {
+        const val KEY_LAST_CALL_EVENT_AT = "LAST_CALL_EVENT_AT"
+
         /** Ask for the outcome, unless this call was already asked about or popups are off. */
         fun maybePrompt(app: Context, record: CallLogHelper.CallRecord) {
             if (!CallIqConfig.popupEnabled(app)) {

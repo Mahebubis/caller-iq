@@ -28,10 +28,11 @@ import { HomeHero } from './src/HomeDash';
 import type { DialerInfo } from './src/ImportsScreen';
 import CallScreen from './src/CallScreen';
 import QuickCallSheet from './src/sheets/QuickCallSheet';
-import Intro, { shouldPlayIntro } from './src/Intro';
+import Intro from './src/Intro';
 import { Icon, IconButton, IconName, PulseDot, Tactile, ToastProvider, useToast } from './src/ui';
 import {
-  BuildInfo, CallLogItem, PopupReadiness, ScheduleTarget, SetupInfo, SmsTarget, SetupStep, SimDiagnostics, SimNicknameMap, UssdSettings,
+  BuildInfo, CallLogItem, PopupReadiness, RecordingSettings, ScheduleTarget, SetupInfo, SmsTarget, SetupStep, SimDiagnostics, SimNicknameMap,
+  UssdSettings,
 } from './src/types';
 
 const { CallBridge } = NativeModules;
@@ -160,6 +161,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
   const [popupTimeout, setPopupTimeout] = useState<number>(45);
   const [simDiag, setSimDiag] = useState<SimDiagnostics>({});
   const [ussd, setUssd] = useState<UssdSettings | null>(null);
+  const [recording, setRecording] = useState<RecordingSettings | null>(null);
   const [checkingSlot, setCheckingSlot] = useState<number | null>(null);
 
   // One-tap setup ("Allow all permissions")
@@ -171,8 +173,14 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
   // "Is this the latest build?" — the note from BUILD_NOTE.txt, shown each time the app opens.
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [showBuildCard, setShowBuildCard] = useState<boolean>(false);
-  // The brand intro, once per cold start; the app loads underneath it.
-  const [introOn, setIntroOn] = useState<boolean>(shouldPlayIntro);
+  /*
+   * The brand intro, each time the app is opened; the app loads underneath it. It plays when the
+   * screen is created and again whenever the app comes back after a minute or more away, but not
+   * when it comes back from a phone call (or a setup screen): the counselor is mid-work then.
+   */
+  const [introOn, setIntroOn] = useState<boolean>(true);
+  const [introResume, setIntroResume] = useState<boolean>(false);
+  const awayAt = useRef<number>(0);
   const [connTest, setConnTest] = useState<{ busy: boolean; ok?: boolean; message?: string }>({ busy: false });
   // Read by the AppState listener, which must always see live values rather than a stale closure.
   const wizardRef = useRef<{ on: boolean; inFlight: string; attempted: Set<string> }>({ on: false, inFlight: '', attempted: new Set() });
@@ -236,7 +244,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
         return all;
       };
 
-      const [statusRes, queueRes, rawLogsRes, nicknameJson, setupRes, readinessRes, ussdRes, diagJson] = await Promise.all([
+      const [statusRes, queueRes, rawLogsRes, nicknameJson, setupRes, readinessRes, ussdRes, diagJson, recRes] = await Promise.all([
         CallBridge.getTrackingStatus ? withTimeout<any>(CallBridge.getTrackingStatus().catch(() => null), 3000, null) : null,
         CallBridge.getPendingQueueCount ? withTimeout(CallBridge.getPendingQueueCount().catch(() => null), 3000, null) : null,
         readCalls(),
@@ -245,6 +253,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
         details && CallBridge.getPopupReadiness ? withTimeout<any>(CallBridge.getPopupReadiness().catch(() => null), 1500, null) : null,
         details && CallBridge.getUssdSettings ? withTimeout<any>(CallBridge.getUssdSettings().catch(() => null), 1500, null) : null,
         details && CallBridge.getSimDiagnostics ? withTimeout(CallBridge.getSimDiagnostics().catch(() => ''), 1500, '') : '',
+        details && CallBridge.getRecordingSettings ? withTimeout<any>(CallBridge.getRecordingSettings().catch(() => null), 1500, null) : null,
       ]);
 
       if (statusRes) {
@@ -257,6 +266,7 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
       if (setupRes) setSetup((prev) => (same(prev, setupRes) ? prev : setupRes));
       if (readinessRes) setReadiness((prev) => (same(prev, readinessRes) ? prev : readinessRes));
       if (ussdRes) setUssd((prev) => (same(prev, ussdRes) ? prev : ussdRes));
+      if (recRes) setRecording((prev) => (same(prev, recRes) ? prev : recRes));
       if (diagJson) {
         try {
           const d = JSON.parse(diagJson);
@@ -593,6 +603,22 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'background') { awayAt.current = Date.now(); return; }
+      if (next !== 'active' || !awayAt.current) return;
+      const left = awayAt.current;
+      awayAt.current = 0;
+      if (Date.now() - left < 60_000 || wizardRef.current.inFlight) return;
+      let lastCall = 0;
+      try { lastCall = CallBridge?.lastCallEventAt?.() || 0; } catch (_) {}
+      if (lastCall >= left) return;
+      setIntroResume(true);
+      setIntroOn(true);
+    });
+    return () => sub.remove();
+  }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
       if (next !== 'active') return;
       const k = wizardRef.current.inFlight;
       // The permission dialog answers through its own promise, not through a return.
@@ -621,6 +647,20 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
       else toast('Make or receive a call first — the preview uses the last call', 'error');
     } catch (err: any) {
       addLog(`Test popup error: ${err.message || err}`);
+    }
+  };
+
+  /* ── Call recordings ──────────────────────────────────────────────────── */
+
+  const toggleRecording = async (on: boolean) => {
+    setRecording((r) => (r ? { ...r, enabled: on } : r));
+    try {
+      const permission = await CallBridge?.setRecordingEnabled?.(on);
+      setRecording((r) => (r ? { ...r, permission: !!permission } : r));
+      if (on && !permission) toast('Allow access to audio files so recordings can be found', 'error');
+      addLog(on ? 'Call recording upload switched on.' : 'Call recording upload switched off.');
+    } catch (err: any) {
+      addLog(`Recording setting error: ${err.message || err}`);
     }
   };
 
@@ -1307,9 +1347,11 @@ const Main = ({ appearance }: { appearance: Appearance }) => {
         onToggleUssd={toggleUssd}
         onUssdCode={saveUssdCode}
         onCheckBalance={checkBalanceNow}
+        recording={recording}
+        onToggleRecording={toggleRecording}
         logs={systemLogs}
       />
-      {introOn && <Intro onDone={() => setIntroOn(false)} />}
+      {introOn && <Intro resume={introResume} onDone={() => setIntroOn(false)} />}
     </Gradient>
     </EngageProvider>
     </WhatsAppProvider>

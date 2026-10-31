@@ -75,6 +75,18 @@ export interface UssdSettings {
   sims: UssdSim[];
 }
 
+/** Uploading the phone's own call recordings (CallRecordingWorker). */
+export interface RecordingSettings {
+  enabled: boolean;
+  /** May read the recorder's audio files. */
+  permission: boolean;
+  today: number;
+  lastOkAt: number;
+  /** Why the last attempt did not go through; empty when it did. */
+  note: string;
+  noteAt: number;
+}
+
 export interface SimDiagnostics {
   sims?: Array<{ slot: number; subscriptionId: number; carrier: string; displayName: string; number: string }>;
   learned?: { [accountId: string]: number };

@@ -442,6 +442,59 @@ class CallBridgeModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** When the phone last rang, picked up or hung up. Synchronous: the intro decides on it at once. */
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun lastCallEventAt(): Double =
+        CallIqConfig.prefs(reactApplicationContext).getLong(CallReceiver.KEY_LAST_CALL_EVENT_AT, 0L).toDouble()
+
+    /* ── Call recordings ──────────────────────────────────────────────────── */
+
+    @ReactMethod
+    fun getRecordingSettings(promise: Promise) {
+        try {
+            val st = CallRecordingWorker.status(reactApplicationContext)
+            promise.resolve(Arguments.createMap().apply {
+                putBoolean("enabled", st.enabled)
+                putBoolean("permission", st.permission)
+                putInt("today", st.today)
+                putDouble("lastOkAt", st.lastOkAt.toDouble())
+                putString("note", st.note)
+                putDouble("noteAt", st.noteAt.toDouble())
+            })
+        } catch (e: Throwable) {
+            promise.reject("recording_settings_failed", e)
+        }
+    }
+
+    /**
+     * Switches uploads on or off. Turning them on asks for the media permission first and resolves
+     * with whether it is held; the last two days' calls are then picked up.
+     */
+    @ReactMethod
+    fun setRecordingEnabled(enabled: Boolean, promise: Promise) {
+        val ctx = reactApplicationContext
+        CallRecordingWorker.setEnabled(ctx, enabled)
+        if (!enabled || CallRecordingFinder.hasPermission(ctx)) { promise.resolve(CallRecordingFinder.hasPermission(ctx)); return }
+
+        val act = currentActivity as? com.facebook.react.modules.core.PermissionAwareActivity
+        if (act == null) { promise.resolve(false); return }
+        var settled = false
+        try {
+            act.requestPermissions(arrayOf(CallRecordingFinder.permission()), 4712, com.facebook.react.modules.core.PermissionListener { code, _, _ ->
+                if (code != 4712) return@PermissionListener false
+                if (!settled) {
+                    settled = true
+                    val ok = CallRecordingFinder.hasPermission(ctx)
+                    if (ok) CallRecordingWorker.backfill(ctx)
+                    promise.resolve(ok)
+                }
+                true
+            })
+        } catch (e: Throwable) {
+            if (!settled) { settled = true; promise.resolve(false) }
+        }
+    }
+
     /* ── SIM balance over USSD ────────────────────────────────────────────── */
 
     /** The codes, the switch, and what the operator last said — the SIM balance screen. */

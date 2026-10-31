@@ -4,6 +4,10 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <!-- Voice notes on a contact's timeline (asked for the first time one is recorded). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Uploading the phone's own call recordings (the dialer's recorder saves them as audio
+         files). Asked for only when the switch in Settings is turned on. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <!-- The in-app call screen: speaker / mute, and End call (asked for the first time it is used). -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />

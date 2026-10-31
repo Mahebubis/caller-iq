@@ -123,6 +123,8 @@ object CallLogHelper {
                         simLabel = sim.label,
                         simSource = sim.source
                     )
+                    // The phone's own recording of the call, if it made one (off unless switched on).
+                    CallRecordingWorker.schedule(context, idempotencyKey, number, callTypeStr, duration, date)
 
                     // Rows come back newest first, so the first one is the call that just ended.
                     if (newestRecord == null) newestRecord = CallRecord(number, callTypeStr, duration, date, idempotencyKey, rawSimId, sim)

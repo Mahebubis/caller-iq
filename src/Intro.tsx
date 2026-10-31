@@ -8,7 +8,8 @@ import { textStyle, useTheme } from './theme';
 const { CallBridge } = NativeModules;
 
 /*
- * The CallIQ brand intro, played once per cold start over the app while it loads underneath:
+ * The CallIQ brand intro, played each time the app is opened (App.tsx decides when) over the app
+ * while it loads underneath:
  *
  *   1 Night    the system splash (Android 12+) shows the mark on night; this screen starts with
  *              the same mark at the same size and place, so the hand-over cannot be seen. Older
@@ -22,10 +23,6 @@ const { CallBridge } = NativeModules;
  * "Remove animations" on, it is a short quiet fade instead.
  */
 
-let played = false;
-/** True only the first time it is asked in this process: a cold start. */
-export const shouldPlayIntro = () => !played;
-
 // The system splash draws the 108-unit icon at 288 dp; the mark's arcs span 41.6 units, so 111 dp.
 // CiqMarkView's arcs span 0.64 of its size: 173 dp keeps the two the same.
 const MARK = 173;
@@ -36,7 +33,8 @@ const GLOW = 3.2;
 const SPARKS = 18;
 const RINGS = 3;
 
-export default function Intro({ onDone }: { onDone: () => void }) {
+/** `resume`: opened again while the app was already running, so no system splash to take over from. */
+export default function Intro({ onDone, resume }: { onDone: () => void; resume?: boolean }) {
   const t = useTheme();
   const { width: W, height: H } = Dimensions.get('screen');
   // Where the system splash put the mark: the centre of the whole screen, in this view's terms.
@@ -53,7 +51,7 @@ export default function Intro({ onDone }: { onDone: () => void }) {
   const rings = useRef(Array.from({ length: RINGS }, () => new Animated.Value(0))).current;
   const burst = useRef(new Animated.Value(0)).current;
   const finished = useRef(false);
-  const drawIn = Platform.OS === 'android' && Number(Platform.Version) < 31;
+  const drawIn = !!resume || (Platform.OS === 'android' && Number(Platform.Version) < 31);
 
   const sparks = useMemo(() => Array.from({ length: SPARKS }, (_, i) => {
     const a = (i / SPARKS) * Math.PI * 2 + ((i * 37) % 11) * 0.04;
@@ -69,7 +67,6 @@ export default function Intro({ onDone }: { onDone: () => void }) {
   const handOver = () => {
     if (finished.current) return;
     finished.current = true;
-    played = true;
     CallBridge?.setSystemBarsTheme?.(t.dark, t.c.bg);
     onDone();
   };
@@ -91,10 +88,9 @@ export default function Intro({ onDone }: { onDone: () => void }) {
    */
   const show = useRef<Animated.CompositeAnimation | null>(null);
   useEffect(() => {
-    played = true;
     CallBridge?.setSystemBarsTheme?.(true, BRAND.night);
     const ease = Easing.bezier(0.2, 0, 0, 1);
-    const d = drawIn ? 450 : 0;                 // older Android: time for the mark to draw itself in
+    const d = drawIn ? 450 : 0;                 // no system splash: time for the mark to draw itself in
     show.current = Animated.sequence([
       Animated.parallel([
         // 2 Glow, and the mark breathing.
